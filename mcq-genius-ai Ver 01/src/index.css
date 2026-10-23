@@ -1,0 +1,46 @@
+@import "tailwindcss";
+
+:root {
+  font-family: 'Be Vietnam Pro', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  letter-spacing: normal;
+  line-height: 1.6;
+}
+
+body {
+  font-family: 'Be Vietnam Pro', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  letter-spacing: normal;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@keyframes snowfall {
+  0% {
+    transform: translateY(-10px) translateX(0) rotate(0deg);
+    opacity: 1;
+  }
+  50% {
+    transform: translateY(12px) translateX(8px) rotate(180deg);
+    opacity: 0.8;
+  }
+  100% {
+    transform: translateY(35px) translateX(-8px) rotate(360deg);
+    opacity: 0.2;
+  }
+}
+
+.animate-snow-1 {
+  animation: snowfall 3s ease-in-out infinite alternate;
+}
+
+.animate-snow-2 {
+  animation: snowfall 4s ease-in-out infinite alternate 1s;
+}
+
+.animate-snow-3 {
+  animation: snowfall 3.5s ease-in-out infinite alternate 0.5s;
+}
+
+/* Custom mountain trail gradient */
+.bg-mountain-gradient {
+  background: linear-gradient(185deg, #0f172a 0%, #1e1b4b 40%, #31102f 100%);
+}

@@ -1,0 +1,8 @@
+{
+  "name": "MCQ Genius AI - Nền Tảng Luyện Thi Trắc Nghiệm & Tranh Luận AI",
+  "description": "Hệ thống quản lý thư viện câu hỏi trắc nghiệm, tự động chia mục từ file Word/Excel, tạo khối đề thi MCQ linh hoạt và tranh luận trực tiếp với AI Gemini.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
