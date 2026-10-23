@@ -1,6 +1,33 @@
 import type { SharedExamDraft } from '../types/quiz';
 
-async function jsonRequest<T>(path: string, method: 'GET' | 'POST', body?: unknown, secret?: string): Promise<T> {
+async function prepareShareImage(blob: Blob): Promise<Blob> {
+  const mime = blob.type.toLowerCase().split(';')[0];
+  if (['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(mime)) return blob;
+
+  const url = URL.createObjectURL(blob);
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    if (!image.naturalWidth || !image.naturalHeight) throw new Error('Ảnh không có kích thước.');
+
+    const scale = Math.min(1, 4096 / image.naturalWidth, 4096 / image.naturalHeight);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Trình duyệt không hỗ trợ chuyển ảnh.');
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    return await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(result => result ? resolve(result) : reject(new Error('Không xuất được ảnh PNG.')), 'image/png');
+    });
+  } catch {
+    throw new Error('Không thể chuyển một ảnh trong đề sang PNG. Hãy kiểm tra ảnh đó rồi thử lại.');
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}async function jsonRequest<T>(path: string, method: 'GET' | 'POST', body?: unknown, secret?: string): Promise<T> {
   const response = await fetch(`/api/share${path}`, {
     method,
     cache: 'no-store',
@@ -52,10 +79,10 @@ export async function publishExam(draft: SharedExamDraft, secret: string, onProg
         } catch {
           throw new Error('Không thể đọc một ảnh trong đề. Vui lòng tải lại ảnh vào ngân hàng câu hỏi rồi thử lại.');
         }
-        const mime = blob.type.toLowerCase().split(';')[0];
-        if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(mime)) {
-          throw new Error('Ảnh chia sẻ chỉ hỗ trợ PNG, JPEG, WebP và GIF.');
-        }
+        if (blob.size > 20_000_000) throw new Error('Có ảnh lớn hơn 20 MB.');
+blob = await prepareShareImage(blob);
+const mime = blob.type.toLowerCase().split(';')[0];
+if (blob.size > 20_000_000) throw new Error('Có ảnh lớn hơn 20 MB.');
         if (blob.size > 20_000_000) throw new Error('Có ảnh lớn hơn 20 MB.');
         const ticket = await jsonRequest<{ signedUrl: string; imageRef: string }>(
           '/image-upload', 'POST', { examId: id, mime, bytes: blob.size }, secret
