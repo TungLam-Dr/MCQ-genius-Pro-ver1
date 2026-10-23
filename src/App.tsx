@@ -10,6 +10,7 @@ import { CategoryManager } from './components/CategoryManager';
 import { TestHistoryView, type ReviewFilter } from './components/TestHistoryView';
 import { GoatCountdownModal } from './components/GoatCountdownModal';
 import { SharedExamDrafts } from './components/SharedExamDrafts';
+import { publishExam } from './services/share';
 import {
   FileUp,
   PlayCircle,
@@ -303,6 +304,12 @@ export default function App() {
 
     setShareDrafts((prev) => [newDraft, ...prev]);
     setActiveTab('share-drafts');
+  };
+
+  const handlePublishShareDraft = async (draft: SharedExamDraft, secret: string, onProgress: (message: string) => void) => {
+    const url = await publishExam(draft, secret, onProgress);
+    setShareDrafts(prev => prev.map(item => item.id === draft.id ? { ...item, shareUrl: url } : item));
+    return url;
   };
 
   const handleDeleteShareDraft = (id: string) => {
@@ -652,6 +659,7 @@ export default function App() {
               onCreate={() => setActiveTab('create-test')}
               onPreview={handlePreviewShareDraft}
               onDelete={handleDeleteShareDraft}
+              onPublish={handlePublishShareDraft}
             />
           </>
         )}

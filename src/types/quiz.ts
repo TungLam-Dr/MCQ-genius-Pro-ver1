@@ -48,12 +48,13 @@ export interface TestConfig {
   shuffleOptions: boolean;
 }
 
-/** Bản đề cố định được chuẩn bị trên thiết bị, chưa phải link chia sẻ. */
+/** Bản đề cố định; link công khai chỉ có sau khi xuất bản. */
 export interface SharedExamDraft {
   id: string;
   createdAt: string;
   config: TestConfig;
   questions: Question[];
+  shareUrl?: string;
 }
 
 export interface UserAnswerRecord {

@@ -1,8 +1,10 @@
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
+import PublicExamPage from './components/PublicExamPage.tsx';
 import './index.css';
 
-createRoot(document.getElementById('root')!).render(<App />);
+const match = window.location.pathname.match(/^\/exam\/([0-9a-f-]{36})\/?$/i);
+createRoot(document.getElementById('root')!).render(match ? <PublicExamPage examId={match[1]} /> : <App />);
 
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {

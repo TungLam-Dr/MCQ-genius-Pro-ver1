@@ -2,6 +2,7 @@ import 'dotenv/config';
 import dns from 'node:dns';
 import express, { Request, Response, NextFunction } from 'express';
 import { GoogleGenAI, Type } from '@google/genai';
+import { shareRouter } from './shareRoutes';
 
 // Ensure IPv4 first to avoid IPv6 hanging on cloud serverless / container environments
 try {
@@ -15,6 +16,14 @@ const app = express();
 // Middleware: Enable JSON payload up to 50MB for exam documents & base64 images
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use((req: Request, _res: Response, next: NextFunction) => {
+  if (req.path === '/api/index' || req.path === '/api') {
+    if (req.query.share === '1' && typeof req.query.path === 'string' && /^[a-z0-9/-]+$/i.test(req.query.path)) req.url = '/api/share/' + req.query.path;
+    else if (typeof req.query.action === 'string' && ['parse-file', 'categorize', 'generate-questions', 'debate', 'health'].includes(req.query.action)) req.url = '/api/gemini/' + req.query.action;
+  }
+  next();
+});
+app.use('/api/share', shareRouter);
 
 // Middleware: Permissive CORS for Vercel preview environments and custom domains
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -458,7 +467,7 @@ app.use('/api/gemini', geminiRouter);
 app.use('/gemini', geminiRouter);
 
 // API health check endpoint for Vercel & diagnostics (excluding '/' so frontend SPA is served on root)
-app.get(['/api', '/api/health', '/health'], (_req: Request, res: Response) => {
+app.get(['/api', '/api/index', '/api/health', '/health'], (_req: Request, res: Response) => {
   const hasKey = Boolean(process.env.GEMINI_API_KEY);
   res.json({
     status: 'ok',
