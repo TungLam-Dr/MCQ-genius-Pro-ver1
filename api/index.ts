@@ -2,7 +2,7 @@ import 'dotenv/config';
 import dns from 'node:dns';
 import express, { Request, Response, NextFunction } from 'express';
 import { GoogleGenAI, Type } from '@google/genai';
-import { shareRouter } from './shareRoutes';
+import { shareRouter } from './shareRoutes.js';
 
 // Ensure IPv4 first to avoid IPv6 hanging on cloud serverless / container environments
 try {
