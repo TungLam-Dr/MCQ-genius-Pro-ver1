@@ -6,6 +6,7 @@ export interface Question {
   options: string[];
   correctAnswer: number; // 0-indexed option index
   explanation?: string;
+  manualExplanation?: string; // Additional editable notes; preserves original rich answer source
   explanationHtml?: string; // Word answer: formatted paragraphs, tables, captions and images
   explanationPages?: { pageNum: number; dataUrl: string }[]; // PDF answer: original page excerpts
   imageUrl?: string;
