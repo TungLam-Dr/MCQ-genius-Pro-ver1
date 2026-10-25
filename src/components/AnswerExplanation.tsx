@@ -125,6 +125,7 @@ export const AnswerExplanation: React.FC<Props> = ({ question, onZoom }) => {
         )}
       </div>
       <div className="px-5 py-6 sm:px-7">
+        {question.manualExplanation && <div className="mb-5 rounded-xl border border-sky-200 bg-sky-50 p-4 text-sm dark:border-sky-900 dark:bg-sky-950"><strong>Ghi chú đã chỉnh sửa</strong><p className="mt-2 whitespace-pre-wrap">{question.manualExplanation}</p></div>}
         {parsed ? (
           <>
             {parsed.objectives.length > 0 && (

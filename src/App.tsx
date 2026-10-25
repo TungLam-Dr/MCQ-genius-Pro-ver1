@@ -213,6 +213,20 @@ export default function App() {
     }));
   };
 
+  const handleUpdateBrowserQuestion = (id: string, changes: Pick<Question, 'question' | 'options' | 'correctAnswer' | 'explanation' | 'manualExplanation' | 'tags'>) => {
+    if (!changes.question.trim() || changes.options.length < 2 || changes.options.some((option) => !option.trim()) ||
+      changes.correctAnswer < 0 || changes.correctAnswer >= changes.options.length) return;
+    setQuestions((previous) => previous.map((item) => item.id === id ? {
+      ...item,
+      question: changes.question.trim(),
+      options: changes.options.map((option) => option.trim()),
+      correctAnswer: changes.correctAnswer,
+      explanation: changes.explanation,
+      manualExplanation: changes.manualExplanation,
+      tags: changes.tags,
+    } : item));
+  };
+
   const handleImportQuestionsFromFile = (
     importedList: Partial<Question>[],
     targetCatId: string,
@@ -720,7 +734,7 @@ export default function App() {
             flags={studyFlags}
             onToggleFlag={toggleStudyFlag}
             onSetFlags={setManyStudyFlags}
-            onUpdateAnswer={handleUpdateQuestionAnswer}
+            onUpdateQuestion={handleUpdateBrowserQuestion}
             onReviewFlagged={handleStartFlaggedReview}
             onOpenBank={() => openQuestionList()}
             onBack={() => setActiveTab('home')}
