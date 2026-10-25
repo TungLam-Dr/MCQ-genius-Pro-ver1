@@ -23,6 +23,7 @@ import {
   ClipboardList,
   Share2,
   Trash2,
+  AlertTriangle,
 } from 'lucide-react';
 
 const FileUploadModal = lazy(() => import('./components/FileUploadModal').then(module => ({ default: module.FileUploadModal })));
@@ -44,7 +45,7 @@ export default function App() {
   const [storageError, setStorageError] = useState('');
 
   // The question bank has its own page; the home page stays compact.
-  const [activeTab, setActiveTab] = useState<'home' | 'questions' | 'history' | 'create-test' | 'runner' | 'result' | 'analyze' | 'share-drafts' | 'share-preview'>('home');
+  const [activeTab, setActiveTab] = useState<'home' | 'questions' | 'unanswered' | 'history' | 'create-test' | 'runner' | 'result' | 'analyze' | 'share-drafts' | 'share-preview'>('home');
   const [questionListCategoryId, setQuestionListCategoryId] = useState<string | 'all'>('all');
 
   // Modals & Selection states
@@ -170,6 +171,13 @@ export default function App() {
     updateCategoryCounts(updated);
   };
 
+  const handleUpdateQuestionAnswer = (questionId: string, correctAnswer: number, explanation: string, options: string[]) => {
+    setQuestions((previous) => previous.map((question) => {
+      if (question.id !== questionId || options.length < 2 || options.some((option) => !option.trim()) || correctAnswer < 0 || correctAnswer >= options.length) return question;
+      return { ...question, options: options.map((option) => option.trim()), correctAnswer, explanation };
+    }));
+  };
+
   const handleImportQuestionsFromFile = (
     importedList: Partial<Question>[],
     targetCatId: string,
@@ -217,6 +225,9 @@ export default function App() {
     const nextQuestions = [...formatted, ...questions];
     setQuestions(nextQuestions);
     updateCategoryCounts(nextQuestions);
+    if (formatted.some((question) => question.options.length < 2 || question.correctAnswer < 0 || question.correctAnswer >= question.options.length)) {
+      setActiveTab('unanswered');
+    }
   };
 
   const updateCategoryCounts = (currentQuestionsList: Question[]) => {
@@ -436,6 +447,11 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  const unansweredCount = questions.filter((question) =>
+    question.options.length < 2 || !Number.isInteger(question.correctAnswer) ||
+    question.correctAnswer < 0 || question.correctAnswer >= question.options.length
+  ).length;
+
   return (
     <div className="min-h-screen bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans selection:bg-amber-500 selection:text-slate-950">
       {/* Top Navbar with Christmas theme, Snowfall animation, and Goat Icon */}
@@ -530,7 +546,7 @@ export default function App() {
             </div>
 
             {/* Quick Links Row */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <button
                 type="button"
                 onClick={() => openQuestionList()}
@@ -557,6 +573,18 @@ export default function App() {
 
               <button
                 type="button"
+                onClick={() => setActiveTab('unanswered')}
+                className="group flex items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-white px-5 py-4 text-left shadow-sm transition-all hover:border-amber-400 hover:shadow-md dark:border-slate-700 dark:bg-slate-800"
+              >
+                <span className="flex items-center gap-3">
+                  <span className="rounded-xl bg-amber-100 p-2.5 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300"><AlertTriangle className="h-5 w-5" /></span>
+                  <span><span className="block text-sm font-bold text-slate-900 dark:text-white">Câu hỏi chưa có đáp án</span><span className="text-xs text-slate-500 dark:text-slate-400">{unansweredCount} câu cần chỉnh sửa</span></span>
+                </span>
+                <ChevronRight className="h-5 w-5 shrink-0 text-amber-500 transition-transform group-hover:translate-x-1" />
+              </button>
+
+              <button
+                type="button"
                 onClick={() => setActiveTab('share-drafts')}
                 className="group flex items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-white px-5 py-4 text-left shadow-sm transition-all hover:border-amber-400 hover:shadow-md dark:border-slate-700 dark:bg-slate-800"
               >
@@ -578,6 +606,7 @@ export default function App() {
               onDeleteCategory={handleDeleteCategory}
               onDeleteQuestion={handleDeleteQuestion}
               onAddQuestion={handleAddQuestion}
+              onUpdateQuestionAnswer={handleUpdateQuestionAnswer}
               onOpenUpload={() => setIsUploadModalOpen(true)}
               onSelectCategoryForTest={(catId) => {
                 setPreselectedCatId(catId);
@@ -608,6 +637,36 @@ export default function App() {
               onDeleteCategory={handleDeleteCategory}
               onDeleteQuestion={handleDeleteQuestion}
               onAddQuestion={handleAddQuestion}
+              onUpdateQuestionAnswer={handleUpdateQuestionAnswer}
+              onOpenUpload={() => setIsUploadModalOpen(true)}
+              onSelectCategoryForTest={(catId) => {
+                setPreselectedCatId(catId);
+                setActiveTab('create-test');
+              }}
+              onAutoCategorizeWithAI={handleAutoCategorizeAI}
+              isCategorizingAI={isCategorizingAI}
+            />
+          </>
+        )}
+
+        {activeTab === 'unanswered' && (
+          <>
+            <div>
+              <button type="button" onClick={() => setActiveTab('home')} className="mb-2 inline-flex min-h-11 items-center gap-1.5 text-sm font-semibold text-indigo-700 hover:underline dark:text-indigo-300"><ArrowLeft className="h-4 w-4" /> Trang chủ</button>
+              <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Câu hỏi chưa có đáp án</h1>
+              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{unansweredCount} câu cần bổ sung đáp án để có thể tạo đề thi.</p>
+            </div>
+            <CategoryManager
+              view="questions"
+              initialCategoryId="all"
+              unansweredOnly
+              categories={categories}
+              questions={questions}
+              onAddCategory={handleAddCategory}
+              onDeleteCategory={handleDeleteCategory}
+              onDeleteQuestion={handleDeleteQuestion}
+              onAddQuestion={handleAddQuestion}
+              onUpdateQuestionAnswer={handleUpdateQuestionAnswer}
               onOpenUpload={() => setIsUploadModalOpen(true)}
               onSelectCategoryForTest={(catId) => {
                 setPreselectedCatId(catId);

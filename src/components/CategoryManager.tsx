@@ -31,6 +31,7 @@ interface CategoryManagerProps {
   onDeleteCategory: (categoryId: string) => void;
   onDeleteQuestion: (questionId: string) => void;
   onAddQuestion: (question: Partial<Question>) => void;
+  onUpdateQuestionAnswer: (questionId: string, correctAnswer: number, explanation: string, options: string[]) => void;
   onOpenUpload: () => void;
   onSelectCategoryForTest: (categoryId: string) => void;
   onAutoCategorizeWithAI: () => void;
@@ -38,6 +39,7 @@ interface CategoryManagerProps {
   view?: 'all' | 'categories' | 'questions';
   initialCategoryId?: string | 'all';
   onOpenQuestionList?: (categoryId: string | 'all') => void;
+  unansweredOnly?: boolean;
 }
 
 const ICON_MAP: Record<string, React.ElementType> = {
@@ -57,6 +59,7 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
   onDeleteCategory,
   onDeleteQuestion,
   onAddQuestion,
+  onUpdateQuestionAnswer,
   onOpenUpload,
   onSelectCategoryForTest,
   onAutoCategorizeWithAI,
@@ -64,6 +67,7 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
   view = 'all',
   initialCategoryId = 'all',
   onOpenQuestionList,
+  unansweredOnly = false,
 }) => {
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | 'all'>(initialCategoryId);
   const [searchQuery, setSearchQuery] = useState('');
@@ -84,6 +88,10 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
   const [newQCatId, setNewQCatId] = useState(categories[0]?.id || '');
   const [newQImageUrl, setNewQImageUrl] = useState('');
   const [previewZoomImage, setPreviewZoomImage] = useState<string | null>(null);
+  const [editingQuestion, setEditingQuestion] = useState<Question | null>(null);
+  const [editingAnswer, setEditingAnswer] = useState(-1);
+  const [editingExplanation, setEditingExplanation] = useState('');
+  const [editingOptions, setEditingOptions] = useState<string[]>([]);
 
   // Filtered questions
   const filteredQuestions = questions.filter((q) => {
@@ -93,9 +101,27 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
       q.options.some((opt) => opt.toLowerCase().includes(searchQuery.toLowerCase())) ||
       (q.explanation && q.explanation.toLowerCase().includes(searchQuery.toLowerCase()));
     const matchDiff = filterDifficulty === 'all' || q.difficulty === filterDifficulty;
+    const matchAnswer = !unansweredOnly || q.options.length < 2 || !Number.isInteger(q.correctAnswer) || q.correctAnswer < 0 || q.correctAnswer >= q.options.length;
 
-    return matchCat && matchSearch && matchDiff;
+    return matchCat && matchSearch && matchDiff && matchAnswer;
   });
+  const visibleQuestionCount = unansweredOnly
+    ? questions.filter((q) => q.options.length < 2 || !Number.isInteger(q.correctAnswer) || q.correctAnswer < 0 || q.correctAnswer >= q.options.length).length
+    : questions.length;
+
+  const openAnswerEditor = (question: Question) => {
+    setEditingQuestion(question);
+    setEditingAnswer(question.correctAnswer >= 0 && question.correctAnswer < question.options.length ? question.correctAnswer : -1);
+    setEditingExplanation(question.explanation || '');
+    setEditingOptions(question.options.length >= 2 ? [...question.options] : [...question.options, ...Array(Math.max(0, 2 - question.options.length)).fill('')]);
+  };
+
+  const saveAnswer = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editingQuestion || editingOptions.length < 2 || editingOptions.some((option) => !option.trim()) || editingAnswer < 0 || editingAnswer >= editingOptions.length) return;
+    onUpdateQuestionAnswer(editingQuestion.id, editingAnswer, editingExplanation.trim(), editingOptions);
+    setEditingQuestion(null);
+  };
 
   const handleCreateCategory = (e: React.FormEvent) => {
     e.preventDefault();
@@ -296,10 +322,10 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
               }`}
             >
               <span>Tất Cả</span>
-              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-black/10 dark:bg-white/10">{questions.length}</span>
+              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-black/10 dark:bg-white/10">{visibleQuestionCount}</span>
             </button>
             {categories.map((cat) => {
-              const count = questions.filter((q) => q.categoryId === cat.id).length;
+              const count = questions.filter((q) => q.categoryId === cat.id && (!unansweredOnly || q.options.length < 2 || !Number.isInteger(q.correctAnswer) || q.correctAnswer < 0 || q.correctAnswer >= q.options.length)).length;
               const isSel = selectedCategoryId === cat.id;
               return (
                 <button
@@ -343,7 +369,7 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
               )}
             </div>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-              Tìm kiếm, xem chi tiết câu hỏi, hình ảnh và đáp án chuẩn.
+              {unansweredOnly ? 'Chọn “Sửa đáp án” để bổ sung đáp án. Câu đã sửa sẽ tự rời danh sách này.' : 'Tìm kiếm, xem chi tiết câu hỏi, hình ảnh và đáp án chuẩn.'}
             </p>
           </div>
 
@@ -374,7 +400,7 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
           <div className="text-center py-12 space-y-3">
             <HelpCircle className="w-12 h-12 text-slate-300 dark:text-slate-600 mx-auto" />
             <p className="text-sm font-medium text-slate-500 dark:text-slate-400">Không tìm thấy câu hỏi nào phù hợp.</p>
-            <p className="text-xs text-slate-400">Hãy nhấn "Tải Đề Từ Docs/Excel/PDF" hoặc thêm câu hỏi mới vào mục này.</p>
+            <p className="text-xs text-slate-400">{unansweredOnly ? 'Không còn câu hỏi thiếu đáp án trong mục đang xem.' : 'Hãy nhấn "Tải Đề Từ Docs/Excel/PDF" hoặc thêm câu hỏi mới vào mục này.'}</p>
           </div>
         ) : (
           <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
@@ -412,13 +438,23 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
                       <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">{q.question}</p>
                     </div>
 
-                  <button
-                    onClick={() => onDeleteQuestion(q.id)}
-                    className="p-1.5 text-slate-400 hover:text-red-500 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"
-                    title="Xóa câu hỏi này"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => openAnswerEditor(q)}
+                      className="inline-flex min-h-11 items-center gap-1 rounded-lg px-2 text-xs font-bold text-indigo-700 hover:bg-indigo-100 dark:text-indigo-300 dark:hover:bg-slate-800"
+                    >
+                      <Edit3 className="h-4 w-4" /> Sửa đáp án
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDeleteQuestion(q.id)}
+                      className="min-h-11 min-w-11 flex items-center justify-center text-slate-400 hover:text-red-500 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"
+                      title="Xóa câu hỏi này"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
 
                 {/* Question Image if present */}
@@ -499,6 +535,37 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
           </div>
         )}
       </div>
+      )}
+
+      {editingQuestion && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <form onSubmit={saveAnswer} className="w-full max-w-xl space-y-4 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl max-h-[90vh] dark:border-slate-700 dark:bg-slate-900">
+            <h3 className="text-lg font-bold">Sửa đáp án câu hỏi</h3>
+            <p className="text-sm font-semibold">{editingQuestion.question}</p>
+            {(editingQuestion.images?.length ? editingQuestion.images : editingQuestion.imageUrl ? [editingQuestion.imageUrl] : []).map((src, index) => (
+              <img key={index} src={src} alt={`Hình câu hỏi ${index + 1}`} className="max-h-44 w-full object-contain" />
+            ))}
+            <fieldset className="space-y-2">
+              <legend className="mb-2 text-sm font-bold">Chọn một đáp án đúng</legend>
+              {editingOptions.map((option, index) => (
+                <div key={index} className={`flex min-h-11 items-center gap-3 rounded-xl border p-2 text-sm ${editingAnswer === index ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/40' : 'border-slate-200 dark:border-slate-700'}`}>
+                  <input type="radio" name="correct-answer" aria-label={`Chọn đáp án ${String.fromCharCode(65 + index)}`} checked={editingAnswer === index} onChange={() => setEditingAnswer(index)} />
+                  <label className="flex min-w-0 flex-1 items-center gap-2 font-bold">{String.fromCharCode(65 + index)}.
+                    <input type="text" value={option} onChange={(event) => setEditingOptions((previous) => previous.map((value, optionIndex) => optionIndex === index ? event.target.value : value))} placeholder={`Phương án ${String.fromCharCode(65 + index)}`} className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-2 py-2 font-normal dark:border-slate-600 dark:bg-slate-800" />
+                  </label>
+                </div>
+              ))}
+              <button type="button" onClick={() => setEditingOptions((previous) => [...previous, ''])} className="min-h-11 rounded-xl border border-indigo-300 px-3 text-xs font-bold text-indigo-700 dark:text-indigo-300">+ Thêm phương án</button>
+            </fieldset>
+            <label className="block text-sm font-bold">Lời giải (tùy chọn)
+              <textarea value={editingExplanation} onChange={(event) => setEditingExplanation(event.target.value)} rows={3} className="mt-2 w-full rounded-xl border border-slate-300 bg-white p-3 text-sm font-normal dark:border-slate-600 dark:bg-slate-800" />
+            </label>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setEditingQuestion(null)} className="min-h-11 rounded-xl px-4 text-sm font-semibold">Hủy</button>
+              <button type="submit" disabled={editingAnswer < 0 || editingOptions.some((option) => !option.trim())} className="min-h-11 rounded-xl bg-indigo-600 px-4 text-sm font-bold text-white disabled:cursor-not-allowed disabled:opacity-50">Lưu đáp án</button>
+            </div>
+          </form>
+        </div>
       )}
 
       {/* MODAL: FAST CATEGORY DELETION CONFIRMATION */}
