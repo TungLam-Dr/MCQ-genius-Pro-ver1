@@ -25,6 +25,7 @@ import {
   ZoomIn,
   ZoomOut,
   Trash2,
+  Flag,
 } from 'lucide-react';
 
 interface TestResultViewProps {
@@ -36,6 +37,9 @@ interface TestResultViewProps {
   onBackToCategories: () => void;
   onOpenAnalyze: () => void;
   onDeleteResult: () => void;
+  studyFlags?: Record<string, boolean>;
+  onToggleStudyFlag?: (questionId: string) => void;
+  availableQuestionIds?: Set<string>;
 }
 
 export const TestResultView: React.FC<TestResultViewProps> = ({
@@ -47,6 +51,9 @@ export const TestResultView: React.FC<TestResultViewProps> = ({
   onBackToCategories,
   onOpenAnalyze,
   onDeleteResult,
+  studyFlags = {},
+  onToggleStudyFlag,
+  availableQuestionIds,
 }) => {
   // CRITICAL REQUIREMENT: Default state is FALSE (hidden answers!)
   const [showAllAnswers, setShowAllAnswers] = useState(fromHistory);
@@ -387,6 +394,12 @@ export const TestResultView: React.FC<TestResultViewProps> = ({
 
                 {/* ACTION BUTTONS FOR THIS QUESTION */}
                 <div className="pt-2 flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 dark:border-slate-800/80">
+                  {onToggleStudyFlag && availableQuestionIds?.has(q.id) && <button
+                    type="button"
+                    onClick={() => onToggleStudyFlag(q.id)}
+                    aria-pressed={!!studyFlags[q.id]}
+                    className={`flex min-h-11 items-center gap-1.5 rounded-xl border px-3 text-xs font-semibold ${studyFlags[q.id] ? 'border-amber-400 bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200' : 'border-slate-300 text-slate-600 dark:border-slate-700 dark:text-slate-300'}`}
+                  ><Flag size={15} fill={studyFlags[q.id] ? 'currentColor' : 'none'} />{studyFlags[q.id] ? 'Đã gắn cờ học' : 'Gắn cờ học lại'}</button>}
                   <button
                     onClick={() => toggleSingleQuestionAnswer(q.id)}
                     className="flex items-center space-x-1.5 px-3 py-1.5 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold text-xs rounded-xl transition-all"

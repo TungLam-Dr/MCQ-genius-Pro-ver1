@@ -1,7 +1,7 @@
 import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { Category, Question, QuestionAttempt, SharedExamDraft, TestConfig, TestResult } from './types/quiz';
 import { INITIAL_CATEGORIES, INITIAL_QUESTIONS } from './data/defaultQuestions';
-import { selectQuestionsForBlock, calculateTestResult } from './utils/quizEngine';
+import { selectQuestionsForBlock, calculateTestResult, isQuestionValid } from './utils/quizEngine';
 import { buildQuestionAttempts } from './utils/analytics';
 import { categorizeQuestionsWithGemini } from './services/gemini';
 import { setStorageItem, getStorageItem } from './utils/storage';
@@ -24,6 +24,7 @@ import {
   Share2,
   Trash2,
   AlertTriangle,
+  PanelLeft,
 } from 'lucide-react';
 
 const FileUploadModal = lazy(() => import('./components/FileUploadModal').then(module => ({ default: module.FileUploadModal })));
@@ -32,12 +33,14 @@ const TestRunner = lazy(() => import('./components/TestRunner').then(module => (
 const TestResultView = lazy(() => import('./components/TestResultView').then(module => ({ default: module.TestResultView })));
 const AnalyticsDashboard = lazy(() => import('./components/AnalyticsDashboard').then(module => ({ default: module.AnalyticsDashboard })));
 const GuestExamPreview = lazy(() => import('./components/GuestExamPreview').then(module => ({ default: module.GuestExamPreview })));
+const QuestionBrowser = lazy(() => import('./components/QuestionBrowser').then(module => ({ default: module.QuestionBrowser })));
 
 export default function App() {
   const [categories, setCategories] = useState<Category[]>(INITIAL_CATEGORIES);
   const [questions, setQuestions] = useState<Question[]>(INITIAL_QUESTIONS);
   const [testHistory, setTestHistory] = useState<TestResult[]>([]);
   const [questionAttempts, setQuestionAttempts] = useState<QuestionAttempt[]>([]);
+  const [studyFlags, setStudyFlags] = useState<Record<string, boolean>>({});
   const [shareDrafts, setShareDrafts] = useState<SharedExamDraft[]>([]);
   const [activeShareDraft, setActiveShareDraft] = useState<SharedExamDraft | null>(null);
   const [pendingDeleteResult, setPendingDeleteResult] = useState<TestResult | null>(null);
@@ -45,7 +48,7 @@ export default function App() {
   const [storageError, setStorageError] = useState('');
 
   // The question bank has its own page; the home page stays compact.
-  const [activeTab, setActiveTab] = useState<'home' | 'questions' | 'unanswered' | 'history' | 'create-test' | 'runner' | 'result' | 'analyze' | 'share-drafts' | 'share-preview'>('home');
+  const [activeTab, setActiveTab] = useState<'home' | 'questions' | 'browser' | 'unanswered' | 'history' | 'create-test' | 'runner' | 'result' | 'analyze' | 'share-drafts' | 'share-preview'>('home');
   const [questionListCategoryId, setQuestionListCategoryId] = useState<string | 'all'>('all');
 
   // Modals & Selection states
@@ -67,12 +70,13 @@ export default function App() {
     let isMounted = true;
     async function hydrateFromStorage() {
       try {
-        const [idbCats, idbQuestions, idbHistory, savedAttempts, idbShareDrafts] = await Promise.all([
+        const [idbCats, idbQuestions, idbHistory, savedAttempts, idbShareDrafts, savedFlags] = await Promise.all([
           getStorageItem<Category[]>('mcq_genius_categories', INITIAL_CATEGORIES),
           getStorageItem<Question[]>('mcq_genius_questions', INITIAL_QUESTIONS),
           getStorageItem<TestResult[]>('mcq_genius_history', []),
           getStorageItem<QuestionAttempt[] | null>('mcq_genius_attempts', null),
           getStorageItem<SharedExamDraft[]>('mcq_genius_share_drafts', []),
+          getStorageItem<Record<string, boolean>>('mcq_genius_study_flags', {}),
         ]);
         // Upgrade old saved tests once. Reconcile any test saved just before an interrupted write.
         const recordedSessions = new Set((savedAttempts || []).map(attempt => attempt.sessionId));
@@ -87,6 +91,7 @@ export default function App() {
           setTestHistory(idbHistory);
           setQuestionAttempts(attempts);
           setShareDrafts(idbShareDrafts);
+          setStudyFlags(savedFlags || {});
           setStorageReady(true);
         }
       } catch (err) {
@@ -122,6 +127,23 @@ export default function App() {
     void setStorageItem('mcq_genius_share_drafts', shareDrafts).catch(() => setStorageError('Không lưu được bản nháp bài thi.'));
   }, [shareDrafts, storageReady]);
 
+  useEffect(() => {
+    if (!storageReady) return;
+    void setStorageItem('mcq_genius_study_flags', studyFlags).catch(() => setStorageError('Không lưu được cờ học tập trên thiết bị.'));
+  }, [studyFlags, storageReady]);
+
+  const toggleStudyFlag = (questionId: string) => setStudyFlags((previous) => {
+    const next = { ...previous };
+    if (next[questionId]) delete next[questionId]; else next[questionId] = true;
+    return next;
+  });
+
+  const setManyStudyFlags = (ids: string[], flagged: boolean) => setStudyFlags((previous) => {
+    const next = { ...previous };
+    ids.forEach((id) => { if (flagged) next[id] = true; else delete next[id]; });
+    return next;
+  });
+
   // Handlers for Category & Questions
   const handleAddCategory = (name: string, description: string) => {
     const newCat: Category = {
@@ -137,6 +159,13 @@ export default function App() {
   };
 
   const handleDeleteCategory = (categoryId: string) => {
+    const deletedIds = new Set(questions.filter((question) => question.categoryId === categoryId).map((question) => question.id));
+    setStudyFlags((previous) => {
+      if (![...deletedIds].some((id) => previous[id])) return previous;
+      const next = { ...previous };
+      deletedIds.forEach((id) => delete next[id]);
+      return next;
+    });
     setCategories((prev) => prev.filter((c) => c.id !== categoryId));
     setQuestions((prev) => {
       const updated = prev.filter((q) => q.categoryId !== categoryId);
@@ -146,6 +175,12 @@ export default function App() {
   };
 
   const handleDeleteQuestion = (questionId: string) => {
+    setStudyFlags((previous) => {
+      if (!previous[questionId]) return previous;
+      const next = { ...previous };
+      delete next[questionId];
+      return next;
+    });
     setQuestions((prev) => {
       const updated = prev.filter((q) => q.id !== questionId);
       updateCategoryCounts(updated);
@@ -349,6 +384,18 @@ export default function App() {
     setActiveTab('runner');
   };
 
+  const handleStartFlaggedReview = () => {
+    const marked = questions.filter((question) => studyFlags[question.id] && isQuestionValid(question));
+    if (!marked.length) return;
+    setCurrentTestConfig({
+      title: `Ôn lại ${marked.length} câu đã gắn cờ`, presetType: 'custom',
+      totalQuestions: marked.length, timeLimitMinutes: 0, selectionMode: 'random_mix',
+      categorySelections: [], shuffleQuestions: false, shuffleOptions: false,
+    });
+    setCurrentTestQuestions(marked.map((question) => ({ ...question })));
+    setActiveTab('runner');
+  };
+
   const handleOpenSavedResult = (result: TestResult, filter: ReviewFilter, source: 'history' | 'analyze') => {
     setCurrentTestResult(result);
     setResultFilter(filter);
@@ -546,7 +593,7 @@ export default function App() {
             </div>
 
             {/* Quick Links Row */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
               <button
                 type="button"
                 onClick={() => openQuestionList()}
@@ -581,6 +628,18 @@ export default function App() {
                   <span><span className="block text-sm font-bold text-slate-900 dark:text-white">Câu hỏi chưa có đáp án</span><span className="text-xs text-slate-500 dark:text-slate-400">{unansweredCount} câu cần chỉnh sửa</span></span>
                 </span>
                 <ChevronRight className="h-5 w-5 shrink-0 text-amber-500 transition-transform group-hover:translate-x-1" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveTab('browser')}
+                className="group flex items-center justify-between gap-3 rounded-2xl border border-indigo-200 bg-white px-5 py-4 text-left shadow-sm transition-all hover:border-indigo-400 hover:shadow-md dark:border-slate-700 dark:bg-slate-800"
+              >
+                <span className="flex items-center gap-3">
+                  <span className="rounded-xl bg-indigo-100 p-2.5 text-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-300"><PanelLeft className="h-5 w-5" /></span>
+                  <span><span className="block text-sm font-bold text-slate-900 dark:text-white">Browser</span><span className="text-xs text-slate-500 dark:text-slate-400">{Object.keys(studyFlags).length} câu gắn cờ</span></span>
+                </span>
+                <ChevronRight className="h-5 w-5 shrink-0 text-indigo-500 transition-transform group-hover:translate-x-1" />
               </button>
 
               <button
@@ -626,6 +685,7 @@ export default function App() {
                 <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Ngân hàng câu hỏi</h1>
                 <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Tìm, lọc và quản lý {questions.length} câu hỏi trong {categories.length} mục.</p>
               </div>
+              <button type="button" onClick={() => setActiveTab('browser')} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-indigo-600 px-4 text-sm font-bold text-white"><PanelLeft size={17} /> Mở Browser</button>
             </div>
             <CategoryManager
               key={questionListCategoryId}
@@ -634,6 +694,8 @@ export default function App() {
               categories={categories}
               questions={questions}
               questionAttempts={questionAttempts}
+              studyFlags={studyFlags}
+              onToggleStudyFlag={toggleStudyFlag}
               onAddCategory={handleAddCategory}
               onDeleteCategory={handleDeleteCategory}
               onDeleteQuestion={handleDeleteQuestion}
@@ -648,6 +710,21 @@ export default function App() {
               isCategorizingAI={isCategorizingAI}
             />
           </>
+        )}
+
+        {activeTab === 'browser' && (
+          <QuestionBrowser
+            questions={questions}
+            categories={categories}
+            attempts={questionAttempts}
+            flags={studyFlags}
+            onToggleFlag={toggleStudyFlag}
+            onSetFlags={setManyStudyFlags}
+            onUpdateAnswer={handleUpdateQuestionAnswer}
+            onReviewFlagged={handleStartFlaggedReview}
+            onOpenBank={() => openQuestionList()}
+            onBack={() => setActiveTab('home')}
+          />
         )}
 
         {activeTab === 'unanswered' && (
@@ -735,6 +812,8 @@ export default function App() {
           <TestRunner
             config={currentTestConfig}
             questions={currentTestQuestions}
+            studyFlags={studyFlags}
+            onToggleStudyFlag={toggleStudyFlag}
             onSubmitTest={handleSubmitTestBlock}
             onCancelTest={() => setActiveTab('home')}
           />
@@ -751,6 +830,9 @@ export default function App() {
             onBackToCategories={() => setActiveTab(viewingSavedResult ? resultReturnTab : 'history')}
             onOpenAnalyze={() => setActiveTab('analyze')}
             onDeleteResult={() => handleDeleteTestResult(currentTestResult)}
+            studyFlags={studyFlags}
+            onToggleStudyFlag={toggleStudyFlag}
+            availableQuestionIds={new Set(questions.map((question) => question.id))}
           />
         )}
       </main></Suspense>}
