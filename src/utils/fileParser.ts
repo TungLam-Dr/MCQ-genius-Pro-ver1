@@ -21,7 +21,7 @@ export interface ParsedKeyEntry {
   correctIndex: number;
   explanation?: string;
   incorrectLetters?: string[];
-  method?: 'explicit' | 'exclusion' | 'grid' | 'unresolved';
+  method?: 'explicit' | 'explanation-first' | 'exclusion' | 'grid' | 'unresolved';
 }
 
 export interface RichAnswerSection {
@@ -139,7 +139,7 @@ export function parseAnswerKeysFromText(text: string): {
 
   // Explanation files: only headers beginning a line delimit questions. Digits
   // inside clinical prose must never become question numbers or answer keys.
-  const header = /^\s*(?:Câu|Question|Q)\s*(\d+)\s*(?:[.):-]\s*)?(?:ID\s*:?\s*(\d+))?\b[^\n]*/gim;
+  const header = /^[ \t]*(?:Câu|Question|Q)[ \t]*(\d+)[ \t]*(?:[.):-][ \t]*)?(?:ID[ \t]*:?[ \t]*(\d+))?\b[^\r\n]*/gim;
   const headers = [...cleaned.matchAll(header)];
   if (headers.length) {
     let activeBlock = declaredBlock;
@@ -156,8 +156,15 @@ export function parseAnswerKeysFromText(text: string): {
       for (const choice of block.matchAll(/\((?:Các\s+)?(?:Lựa\s*chọn|Phương\s*án)\s+([^)]*)\)/gi)) {
         for (const letter of choice[1].match(/\b[A-J]\b/gi) || []) incorrect.add(letter.toUpperCase());
       }
-      let correctLetter = explicit?.[1]?.toUpperCase() || '';
-      let method: ParsedKeyEntry['method'] = explicit ? 'explicit' : 'unresolved';
+      // Some answer documents put the correct option first, followed by its
+      // explanation, then discuss the remaining options in arbitrary order.
+      // Only accept a substantive option-labelled first paragraph; a bare
+      // option list or a short label is insufficient evidence.
+      const firstSolution = block.slice(h[0].length).trimStart().match(/^([A-J])[.)]\s+([^\n]+)/i);
+      const leadingLetter = firstSolution && firstSolution[2].trim().length >= 40
+        ? firstSolution[1].toUpperCase() : '';
+      let correctLetter = explicit?.[1]?.toUpperCase() || leadingLetter;
+      let method: ParsedKeyEntry['method'] = explicit ? 'explicit' : leadingLetter ? 'explanation-first' : 'unresolved';
       if (!correctLetter && incorrect.size >= 2) {
         // Provisional only; applyAnswerKeysToQuestions rechecks against the
         // ACTUAL number of options before accepting an exclusion answer.
@@ -209,7 +216,7 @@ export function parseTextToStructuredQuestions(rawText: string): Partial<Questio
 
   const bottomKeys = parseAnswerKeysFromText(bottomKeysText);
   const questions: Partial<Question>[] = [];
-  const header = /^\s*(?:Câu|Question|Q)\s*(\d+)\s*(?:[.):-]\s*)?(?:ID\s*:?\s*(\d+))?\b[^\n]*/gim;
+  const header = /^[ \t]*(?:Câu|Question|Q)[ \t]*(\d+)[ \t]*(?:[.):-][ \t]*)?(?:ID[ \t]*:?[ \t]*(\d+))?\b[^\r\n]*/gim;
   const markers = [...mainBodyText.matchAll(header)];
   let currentBlock = 1;
 
@@ -312,7 +319,8 @@ export function applyAnswerKeysToQuestions(
     return row[b.length];
   };
   const resolvedIndex = (entry: ParsedKeyEntry, options: string[]): number => {
-    if (entry.method === 'explicit' || entry.method === 'grid') return entry.correctIndex >= 0 && entry.correctIndex < options.length ? entry.correctIndex : -1;
+    if (entry.method === 'explicit' || entry.method === 'grid' || entry.method === 'explanation-first')
+      return entry.correctIndex >= 0 && entry.correctIndex < options.length ? entry.correctIndex : -1;
     const excluded = new Set(entry.incorrectLetters || []);
     if (excluded.size < 2) return -1;
     const remaining = options.map((_,i)=>String.fromCharCode(65+i)).filter(l=>!excluded.has(l));
@@ -359,8 +367,8 @@ export function applyAnswerKeysToQuestions(
 
     const chosen = answers[0];
     const rich = keys.flatMap(k=>k.richSections).filter(s=>
-      (s.sourceBlock===undefined || q.sourceBlock===undefined || s.sourceBlock===q.sourceBlock) &&
-      (qIdTag && s.sourceId===qIdTag || s.sourceNumber===number && s.sourceBlock!==undefined && s.sourceBlock===q.sourceBlock));
+      (s.sourceBlock===q.sourceBlock || singleBlockBank && s.sourceBlock===undefined) &&
+      (qIdTag && s.sourceId===qIdTag || s.sourceNumber===number && !s.sourceId && singleBlockBank));
     const preferred = rich.find(s=>!!s.html) || rich[0];
     matchedCount++;
     if (fuzzy) reviewMatches.push({questionNumber:number,sourceBlock:q.sourceBlock,
