@@ -63,6 +63,7 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
   const [isProcessingKeyFile, setIsProcessingKeyFile] = useState(false);
   const [totalMatchedKeysCount, setTotalMatchedKeysCount] = useState<number | null>(null);
   const [reviewMatches, setReviewMatches] = useState<KeyMatchIssue[]>([]);
+  const [manualAnswers, setManualAnswers] = useState<Record<number, number>>({});
 
   // Category Target states
   const [selectedTargetCatId, setSelectedTargetCatId] = useState<string>(categories[0]?.id || 'new');
@@ -80,6 +81,7 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
     setKeyFiles([]);
     setTotalMatchedKeysCount(null);
     setReviewMatches([]);
+    setManualAnswers({});
 
     try {
       const parseRes = await parseUploadedFile(selectedFile);
@@ -147,7 +149,9 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
       const activeFiles = currentKeyFiles.filter((kf) => kf.enabled);
 
       if (activeFiles.length === 0) {
-        setExtractedQuestions(baseQuestions);
+        setExtractedQuestions(baseQuestions.map((question, index) =>
+          manualAnswers[index] === undefined ? question : { ...question, correctAnswer: manualAnswers[index] }
+        ));
         setTotalMatchedKeysCount(0);
         setReviewMatches([]);
         return;
@@ -164,7 +168,9 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
       });
 
       setKeyFiles(updatedKeyFiles);
-      setExtractedQuestions(updatedQuestions);
+      setExtractedQuestions(updatedQuestions.map((question, index) =>
+        manualAnswers[index] === undefined ? question : { ...question, correctAnswer: manualAnswers[index] }
+      ));
       setTotalMatchedKeysCount(matchedCount);
       setReviewMatches(reviewMatches);
     } catch (err: any) {
@@ -217,6 +223,13 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
     recalculateAnswerKeys(remainingKeyFiles, originalQuestionsBackup);
   };
 
+  const chooseAnswerManually = (questionIndex: number, answerIndex: number) => {
+    setManualAnswers((previous) => ({ ...previous, [questionIndex]: answerIndex }));
+    setExtractedQuestions((previous) => previous.map((question, index) =>
+      index === questionIndex ? { ...question, correctAnswer: answerIndex } : question
+    ));
+  };
+
   const handleFinalImport = () => {
     if (extractedQuestions.length === 0) return;
 
@@ -232,6 +245,7 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
     setExtractedQuestions([]);
     setOriginalQuestionsBackup([]);
     setReviewMatches([]);
+    setManualAnswers({});
     onClose();
   };
 
@@ -394,7 +408,7 @@ BẢNG ĐÁP ÁN THAM KHẢO (Đề ở trên - Đáp án ở dưới):
                   </p>
                   <p className="text-[11px]">{Object.entries(missingByBlock).map(([name,count])=>`${name}: ${count} câu`).join(' · ')}</p>
                   <p className="text-[11px] opacity-90">
-                    Bạn có thể tải 1 hoặc nhiều file đáp án bên dưới. Các câu chưa có đáp án sẽ được gắn nhãn <strong className="text-amber-700 dark:text-amber-300">"Không khả dụng"</strong> và tự động BỎ QUA khi tạo bài thi MCQ.
+                    Chọn đáp án trực tiếp trong bản xem trước hoặc tải thêm file đáp án. Sau khi nhập, mở mục "Câu hỏi chưa có đáp án" ở trang chủ để sửa tiếp.
                   </p>
                 </div>
               </div>
@@ -527,9 +541,9 @@ BẢNG ĐÁP ÁN THAM KHẢO (Đề ở trên - Đáp án ở dưới):
               {extractedQuestions.map((q, idx) => {
                 if (!q) return null;
                 const qText = typeof q.question === 'string' ? q.question : String(q.question || '');
-                const qOpts = Array.isArray(q.options) ? q.options : ['A. Đúng', 'B. Sai'];
+                const qOpts = Array.isArray(q.options) ? q.options : [];
                 const qAns = typeof q.correctAnswer === 'number' ? q.correctAnswer : -1;
-                const isUnanswered = qAns < 0 || qAns >= qOpts.length;
+                const isUnanswered = qOpts.length < 2 || qAns < 0 || qAns >= qOpts.length;
 
                 return (
                   <div
@@ -593,18 +607,22 @@ BẢNG ĐÁP ÁN THAM KHẢO (Đề ở trên - Đáp án ở dưới):
 
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-1 text-[11px] text-slate-600 dark:text-slate-300 pt-1">
                       {qOpts.map((opt, oIdx) => (
-                        <span
+                        <button
+                          type="button"
                           key={oIdx}
-                          className={
-                            !isUnanswered && oIdx === qAns
-                              ? 'font-bold text-emerald-600 dark:text-emerald-400'
-                              : ''
-                          }
+                          onClick={() => chooseAnswerManually(idx, oIdx)}
+                          disabled={qOpts.length < 2}
+                          aria-pressed={oIdx === qAns}
+                          className={`min-h-11 rounded-lg border p-2 text-left transition-colors disabled:opacity-50 ${oIdx === qAns
+                            ? 'border-emerald-500 bg-emerald-50 font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
+                            : 'border-slate-200 bg-white hover:border-indigo-400 dark:border-slate-700 dark:bg-slate-800'}`}
                         >
                           {String.fromCharCode(65 + Math.min(25, Math.max(0, oIdx)))}. {typeof opt === 'string' ? opt : String(opt || '')}
-                        </span>
+                        </button>
                       ))}
                     </div>
+
+                    {qOpts.length < 2 && <p className="text-[11px] text-amber-700 dark:text-amber-300">Thiếu phương án lựa chọn: nhập câu hỏi rồi bổ sung trong mục "Câu hỏi chưa có đáp án".</p>}
 
                     {q.explanation && (
                       <p className="text-[11px] text-slate-500 italic bg-slate-50 dark:bg-slate-900 p-2 rounded-lg line-clamp-2">
@@ -627,6 +645,7 @@ BẢNG ĐÁP ÁN THAM KHẢO (Đề ở trên - Đáp án ở dưới):
               setKeyFiles([]);
               setExtractedQuestions([]);
               setOriginalQuestionsBackup([]);
+              setManualAnswers({});
             }}
             className="text-xs font-semibold text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
           >
