@@ -21,6 +21,8 @@ import {
 interface TestRunnerProps {
   config: TestConfig;
   questions: Question[];
+  studyFlags?: Record<string, boolean>;
+  onToggleStudyFlag?: (questionId: string) => void;
   onSubmitTest: (
     userAnswers: Record<string, number | null>,
     flaggedQuestions: Record<string, boolean>,
@@ -32,6 +34,8 @@ interface TestRunnerProps {
 export const TestRunner: React.FC<TestRunnerProps> = ({
   config,
   questions,
+  studyFlags = {},
+  onToggleStudyFlag,
   onSubmitTest,
   onCancelTest,
 }) => {
@@ -191,7 +195,7 @@ export const TestRunner: React.FC<TestRunnerProps> = ({
         <div className="lg:col-span-3 space-y-6">
           <div className="bg-white dark:bg-slate-800 rounded-3xl p-4 sm:p-6 border border-slate-200 dark:border-slate-700 shadow-xl space-y-6">
             {/* Question Header */}
-            <div className="flex items-start justify-between gap-4 pb-4 border-b border-slate-200 dark:border-slate-700">
+            <div className="flex flex-wrap items-start justify-between gap-3 pb-4 border-b border-slate-200 dark:border-slate-700">
               <div className="flex items-center space-x-2">
                 <span className="px-3 py-1 bg-indigo-600 text-white font-bold text-xs rounded-xl">
                   Câu {currentIndex + 1} / {questions.length}
@@ -201,17 +205,29 @@ export const TestRunner: React.FC<TestRunnerProps> = ({
                 </span>
               </div>
 
-              <button
-                onClick={() => toggleFlag(currentQuestion.id)}
-                className={`flex min-h-11 items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
-                  flaggedQuestions[currentQuestion.id]
-                    ? 'bg-amber-500/20 text-amber-600 dark:text-amber-300 border-amber-500/50'
-                    : 'bg-slate-100 dark:bg-slate-700/50 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-600'
-                }`}
-              >
-                <Flag className="w-3.5 h-3.5 fill-current" />
-                <span>{flaggedQuestions[currentQuestion.id] ? 'Đã đánh dấu' : 'Đánh dấu xem lại'}</span>
-              </button>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => toggleFlag(currentQuestion.id)}
+                  className={`flex min-h-11 items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
+                    flaggedQuestions[currentQuestion.id]
+                      ? 'bg-amber-500/20 text-amber-600 dark:text-amber-300 border-amber-500/50'
+                      : 'bg-slate-100 dark:bg-slate-700/50 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-600'
+                  }`}
+                >
+                  <Flag className="w-3.5 h-3.5" />
+                  <span>{flaggedQuestions[currentQuestion.id] ? 'Đã đánh dấu bài thi' : 'Đánh dấu bài thi'}</span>
+                </button>
+                {onToggleStudyFlag && <button
+                  type="button"
+                  onClick={() => onToggleStudyFlag(currentQuestion.id)}
+                  aria-pressed={!!studyFlags[currentQuestion.id]}
+                  className={`flex min-h-11 items-center gap-1.5 rounded-xl border px-3 text-xs font-semibold ${studyFlags[currentQuestion.id] ? 'border-indigo-500 bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-200' : 'border-slate-200 bg-slate-100 text-slate-600 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-300'}`}
+                >
+                  <Flag className="h-3.5 w-3.5" fill={studyFlags[currentQuestion.id] ? 'currentColor' : 'none'} />
+                  {studyFlags[currentQuestion.id] ? 'Đã lưu ôn lâu dài' : 'Lưu ôn lâu dài'}
+                </button>}
+              </div>
             </div>
 
             {/* Question Stem */}

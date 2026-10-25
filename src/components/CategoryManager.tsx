@@ -20,6 +20,7 @@ import {
   ChevronRight,
   Filter,
   AlertTriangle,
+  Flag,
   Maximize2,
   X,
 } from 'lucide-react';
@@ -28,6 +29,8 @@ interface CategoryManagerProps {
   categories: Category[];
   questions: Question[];
   questionAttempts?: QuestionAttempt[];
+  studyFlags?: Record<string, boolean>;
+  onToggleStudyFlag?: (questionId: string) => void;
   onAddCategory: (categoryName: string, description: string) => void;
   onDeleteCategory: (categoryId: string) => void;
   onDeleteQuestion: (questionId: string) => void;
@@ -61,6 +64,8 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
   categories,
   questions,
   questionAttempts = [],
+  studyFlags = {},
+  onToggleStudyFlag,
   onAddCategory,
   onDeleteCategory,
   onDeleteQuestion,
@@ -78,7 +83,7 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | 'all'>(initialCategoryId);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterDifficulty, setFilterDifficulty] = useState<string>('all');
-  const [practiceFilter, setPracticeFilter] = useState<'all' | 'unanswered' | 'unattempted' | 'attempted' | 'mistaken'>('all');
+  const [practiceFilter, setPracticeFilter] = useState<'all' | 'unanswered' | 'unattempted' | 'attempted' | 'mistaken' | 'flagged'>('all');
   const [sortMode, setSortMode] = useState<'recent' | 'most-wrong' | 'most-practiced'>('recent');
   const [page, setPage] = useState(1);
   const [showAddCatModal, setShowAddCatModal] = useState(false);
@@ -122,8 +127,9 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
       unattempted: scoped.filter((question) => (practiceStats.get(question.id)?.answered || 0) === 0).length,
       attempted: scoped.filter((question) => (practiceStats.get(question.id)?.answered || 0) > 0).length,
       mistaken: scoped.filter((question) => (practiceStats.get(question.id)?.incorrect || 0) > 0).length,
+      flagged: scoped.filter((question) => !!studyFlags[question.id]).length,
     };
-  }, [questions, practiceStats, selectedCategoryId]);
+  }, [questions, practiceStats, selectedCategoryId, studyFlags]);
 
   // Search and practice filters share the same question bank.
   const normalizedSearch = searchQuery.trim().toLowerCase();
@@ -143,7 +149,8 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
       (practiceFilter === 'unanswered' && needsAnswer(q)) ||
       (practiceFilter === 'unattempted' && !stats?.answered) ||
       (practiceFilter === 'attempted' && !!stats?.answered) ||
-      (practiceFilter === 'mistaken' && !!stats?.incorrect);
+      (practiceFilter === 'mistaken' && !!stats?.incorrect) ||
+      (practiceFilter === 'flagged' && !!studyFlags[q.id]);
 
     return matchCat && matchSearch && matchDiff && matchAnswer && matchPractice;
   });
@@ -400,6 +407,7 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
                 ['unattempted', 'Chưa làm'],
                 ['attempted', 'Đã làm'],
                 ['mistaken', 'Từng làm sai'],
+                ['flagged', 'Đã gắn cờ'],
                 ['unanswered', 'Chưa có đáp án'],
               ] as const).map(([filter, label]) => (
                 <button
@@ -526,6 +534,13 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
                     </div>
 
                   <div className="flex shrink-0 items-center gap-2">
+                    {onToggleStudyFlag && <button
+                      type="button"
+                      onClick={() => onToggleStudyFlag(q.id)}
+                      aria-label={studyFlags[q.id] ? 'Bỏ cờ học tập' : 'Gắn cờ học tập'}
+                      aria-pressed={!!studyFlags[q.id]}
+                      className={`flex min-h-11 min-w-11 items-center justify-center rounded-lg ${studyFlags[q.id] ? 'bg-amber-100 text-amber-600' : 'text-slate-400 hover:bg-amber-50 hover:text-amber-600'}`}
+                    ><Flag size={16} fill={studyFlags[q.id] ? 'currentColor' : 'none'} /></button>}
                     <button
                       type="button"
                       onClick={() => openAnswerEditor(q)}
