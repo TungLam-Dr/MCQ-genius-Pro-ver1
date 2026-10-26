@@ -2,6 +2,7 @@ import React, { useMemo, useRef, useState } from 'react';
 import { AlertTriangle, ArrowLeft, Bookmark, BookOpen, Check, ChevronLeft, ChevronRight, Flag, Image as ImageIcon, Pencil, Search, X } from 'lucide-react';
 import { Category, Question, QuestionAttempt } from '../types/quiz';
 import { isQuestionValid } from '../utils/quizEngine';
+import { categoryPath, isFolder, subtreeIds } from '../utils/categoryTree';
 import { AnswerExplanation } from './AnswerExplanation';
 
 type Status = 'all' | 'flagged' | 'review' | 'mistaken' | 'unattempted' | 'attempted' | 'today' | 'unanswered' | 'images';
@@ -82,10 +83,11 @@ export const QuestionBrowser: React.FC<Props> = ({
 
   const tags = useMemo(() => Array.from(new Set(questions.flatMap((q) => q.tags || []))).sort(), [questions]);
   const blocks = useMemo(() => Array.from(new Set(questions.map((q) => q.sourceBlock).filter((value): value is number => typeof value === 'number'))).sort((a, b) => a - b), [questions]);
+  const categoryIds = useMemo(() => categoryId === 'all' ? null : subtreeIds(categories, categoryId), [categories, categoryId]);
   const scoped = useMemo(() => questions.filter((q) =>
-    (categoryId === 'all' || q.categoryId === categoryId) &&
+    (!categoryIds || categoryIds.has(q.categoryId)) &&
     (sourceBlock === 'all' || q.sourceBlock === Number(sourceBlock))
-  ), [questions, categoryId, sourceBlock]);
+  ), [questions, categoryIds, sourceBlock]);
   const counts = useMemo(() => ({
     all: scoped.length,
     flagged: scoped.filter((q) => flags[q.id]).length,
@@ -186,7 +188,7 @@ export const QuestionBrowser: React.FC<Props> = ({
             <h2 className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500">Mục học</h2>
             <select aria-label="Lọc theo mục" value={categoryId} onChange={(e) => { setCategoryId(e.target.value); setPage(1); setSelectedId(null); setSelectedIds(new Set()); resetPreview(); }} className="min-h-11 w-full rounded-xl border border-slate-300 bg-white px-2 text-sm dark:border-slate-600 dark:bg-slate-900">
               <option value="all">Tất cả mục ({questions.length})</option>
-              {categories.map((cat) => <option key={cat.id} value={cat.id}>{cat.name} ({questions.filter((q) => q.categoryId === cat.id).length})</option>)}
+              {categories.map((cat) => <option key={cat.id} value={cat.id}>{isFolder(cat) ? '📁 ' : ''}{categoryPath(categories, cat.id)} ({questions.filter((q) => subtreeIds(categories, cat.id).has(q.categoryId)).length})</option>)}
             </select>
           </div>
           {blocks.length > 0 && <div>

@@ -23,6 +23,9 @@ export interface Category {
   id: string;
   name: string;
   description: string;
+  /** Older categories have no kind/parentId and remain question categories at the root. */
+  kind?: 'folder' | 'questions';
+  parentId?: string | null;
   icon?: string;
   color?: string;
   questionCount: number;

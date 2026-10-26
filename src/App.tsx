@@ -7,6 +7,7 @@ import { categorizeQuestionsWithGemini } from './services/gemini';
 import { setStorageItem, getStorageItem, replaceStoredSnapshot } from './utils/storage';
 import type { CloudSnapshot } from './services/cloudSync';
 import { scheduleReview } from './utils/reviewScheduler';
+import { canMoveCategory, isFolder } from './utils/categoryTree';
 import { Navbar } from './components/Navbar';
 import { CategoryManager } from './components/CategoryManager';
 import { TestHistoryView, type ReviewFilter } from './components/TestHistoryView';
@@ -214,11 +215,12 @@ export default function App() {
   };
 
   // Handlers for Category & Questions
-  const handleAddCategory = (name: string, description: string) => {
+  const handleAddCategory = (name: string, description: string, parentId: string | null = null) => {
     const newCat: Category = {
       id: `cat-${Date.now()}`,
       name,
       description,
+      parentId: parentId && categories.some(category => category.id === parentId && isFolder(category)) ? parentId : null,
       icon: 'FolderTree',
       color: 'from-purple-500 to-indigo-600',
       questionCount: 0,
@@ -227,7 +229,42 @@ export default function App() {
     setCategories((prev) => [...prev, newCat]);
   };
 
+  const handleCreateFolder = (name: string, description: string, parentId: string | null) => {
+    if (!name.trim()) return;
+    setCategories(previous => {
+      if (parentId && !previous.some(category => category.id === parentId && isFolder(category))) return previous;
+      return [...previous, {
+        id: `folder-${crypto.randomUUID()}`, name: name.trim(), description: description.trim(),
+        kind: 'folder', parentId, icon: 'FolderTree', color: 'from-amber-500 to-orange-600',
+        questionCount: 0, createdAt: new Date().toISOString(),
+      }];
+    });
+  };
+
+  const handleUpdateCategory = (id: string, name: string, description: string, parentId: string | null) => {
+    if (!name.trim()) return;
+    const category = categories.find(item => item.id === id);
+    if (!category || !canMoveCategory(categories, id, parentId)) return;
+    const nextName = name.trim();
+    setCategories(previous => previous.map(item => item.id === id
+      ? { ...item, name: nextName, description: description.trim(), parentId }
+      : item));
+    if (!isFolder(category) && nextName !== category.name) {
+      setQuestions(previous => previous.map(question => question.categoryId === id
+        ? { ...question, categoryName: nextName } : question));
+    }
+  };
+
+  const handleDeleteFolder = (id: string) => {
+    setCategories(previous => {
+      const folder = previous.find(category => category.id === id);
+      if (!folder || !isFolder(folder) || previous.some(category => category.parentId === id) || questions.some(question => question.categoryId === id)) return previous;
+      return previous.filter(category => category.id !== id);
+    });
+  };
+
   const handleDeleteCategory = (categoryId: string) => {
+    if (categories.some(category => category.id === categoryId && isFolder(category)) || categories.some(category => category.parentId === categoryId)) return;
     const deletedIds = new Set(questions.filter((question) => question.categoryId === categoryId).map((question) => question.id));
     const withoutDeleted = <T,>(previous: Record<string, T>) => {
       const next = { ...previous }; deletedIds.forEach(id => delete next[id]); return next;
@@ -437,7 +474,8 @@ export default function App() {
           });
         });
 
-        setCategories(newCatList);
+        // Keep existing folders and old imported categories; AI classification must not erase the library tree.
+        setCategories(previous => [...previous, ...newCatList]);
         setQuestions(updatedQuestions);
       }
     } catch (err: any) {
@@ -825,6 +863,9 @@ export default function App() {
             {/* Category Manager Section */}
             <CategoryManager
               view="categories"
+              onCreateFolder={handleCreateFolder}
+              onUpdateCategory={handleUpdateCategory}
+              onDeleteFolder={handleDeleteFolder}
               categories={categories}
               questions={questions}
               onOpenQuestionList={openQuestionList}
@@ -850,13 +891,16 @@ export default function App() {
               <div>
                 <button type="button" onClick={() => setActiveTab('home')} className="mb-2 inline-flex items-center gap-1.5 text-sm font-semibold text-indigo-700 hover:underline dark:text-indigo-300"><ArrowLeft className="h-4 w-4" /> Trang chủ</button>
                 <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Ngân hàng câu hỏi</h1>
-                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Tìm, lọc và quản lý {questions.length} câu hỏi trong {categories.length} mục.</p>
+                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Tìm, lọc và quản lý {questions.length} câu hỏi trong {categories.filter(category => !isFolder(category)).length} mục đề thi và {categories.filter(isFolder).length} thư mục.</p>
               </div>
               <button type="button" onClick={() => setActiveTab('browser')} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-indigo-600 px-4 text-sm font-bold text-white"><PanelLeft size={17} /> Mở Browser</button>
             </div>
             <CategoryManager
               key={questionListCategoryId}
               view="questions"
+              onCreateFolder={handleCreateFolder}
+              onUpdateCategory={handleUpdateCategory}
+              onDeleteFolder={handleDeleteFolder}
               initialCategoryId={questionListCategoryId}
               categories={categories}
               questions={questions}
@@ -925,6 +969,9 @@ export default function App() {
               view="questions"
               initialCategoryId="all"
               unansweredOnly
+              onCreateFolder={handleCreateFolder}
+              onUpdateCategory={handleUpdateCategory}
+              onDeleteFolder={handleDeleteFolder}
               categories={categories}
               questions={questions}
               onAddCategory={handleAddCategory}
