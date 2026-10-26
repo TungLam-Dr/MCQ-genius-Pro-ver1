@@ -1,6 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTextToStructuredQuestions, parseAnswerKeysFromText, applyAnswerKeysToQuestions } from './fileParser';
+import { parseTextToStructuredQuestions, parseAnswerKeysFromText, applyAnswerKeysToQuestions, parseDocxQuestionHtml } from './fileParser';
+import { selectQuestionsForBlock } from './quizEngine';
+import type { Question, TestConfig } from '../types/quiz';
+
+test('Word question with image-only A–E options keeps each image in its own choice after shuffling', () => {
+  const images = ['a', 'b', 'c', 'd', 'e'].map(letter => `data:image/png;base64,${letter}`);
+  const html = `<p>Câu 6 ID: 20288 Chọn hình đúng?</p>${images.map((_, i) => `<p>${String.fromCharCode(65 + i)}.<img src="image-${i}" /></p>`).join('')}<p>Câu 7 ID: 1967 Câu tiếp?</p><p>A. Một</p><p>B. Hai</p>`;
+  const {questions} = parseDocxQuestionHtml(html, images);
+  assert.equal(questions.length, 2);
+  assert.deepEqual(questions[0].optionImages, images.map(image => [image]));
+  assert.deepEqual(questions[0].options, Array(5).fill('Hình ảnh'));
+  assert.deepEqual(questions[0].images, []);
+  const question = {...questions[0], id:'q6', categoryId:'c', categoryName:'Test', correctAnswer:2} as Question;
+  const config = { selectionMode:'random', categorySelections:[], totalQuestions:1, shuffleQuestions:false, shuffleOptions:true } as unknown as TestConfig;
+  const [shuffled] = selectQuestionsForBlock([question], config);
+  assert.equal(shuffled.optionImages?.[shuffled.correctAnswer]?.[0], images[2]);
+  assert.deepEqual(shuffled.optionImages?.flat().sort(), [...images].sort());
+});
 
 test('parseTextToStructuredQuestions handles Viet-USMLE PDF format with ID tags and 5 options', () => {
   const samplePdfText = `

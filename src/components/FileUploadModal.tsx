@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Category, Question } from '../types/quiz';
 import { categoryPath, isFolder } from '../utils/categoryTree';
 import { parseUploadedFile, extractAnswerKeyDocument, applyAnswerKeysToQuestions, KeyMatchIssue, AnswerKeyDocument } from '../utils/fileParser';
+import { OptionContent } from './OptionContent';
 import { parseFileWithGemini } from '../services/gemini';
 import {
   UploadCloud,
@@ -123,6 +124,7 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
         difficulty: q?.difficulty || 'medium',
         imageUrl: q?.imageUrl,
         images: q?.images,
+        optionImages: q?.optionImages,
         sourceId: q?.sourceId,
         sourceBlock: q?.sourceBlock,
         sourceNumber: q?.sourceNumber,
@@ -618,7 +620,7 @@ BẢNG ĐÁP ÁN THAM KHẢO (Đề ở trên - Đáp án ở dưới):
                             ? 'border-emerald-500 bg-emerald-50 font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
                             : 'border-slate-200 bg-white hover:border-indigo-400 dark:border-slate-700 dark:bg-slate-800'}`}
                         >
-                          {String.fromCharCode(65 + Math.min(25, Math.max(0, oIdx)))}. {typeof opt === 'string' ? opt : String(opt || '')}
+                          {String.fromCharCode(65 + Math.min(25, Math.max(0, oIdx)))}. <OptionContent text={typeof opt === 'string' ? opt : String(opt || '')} images={q.optionImages?.[oIdx]} letter={String.fromCharCode(65 + oIdx)} onZoom={setPreviewZoomImage} />
                         </button>
                       ))}
                     </div>

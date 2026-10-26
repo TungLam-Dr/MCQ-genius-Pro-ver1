@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import type { SharedExamDraft } from '../types/quiz';
 import { formatTimeMinutesSeconds } from '../utils/quizEngine';
+import { OptionContent } from './OptionContent';
 
 interface Props {
   draft: SharedExamDraft;
@@ -272,7 +273,7 @@ export const GuestExamPreview: React.FC<Props> = ({ draft, onExitPreview }) => {
                               <span className="w-5 h-5 rounded-md bg-black/10 dark:bg-white/10 flex items-center justify-center font-bold text-[10px] shrink-0">
                                 {String.fromCharCode(65 + oIdx)}
                               </span>
-                              <span className="flex-1">{opt}</span>
+                              <OptionContent text={opt} images={q.optionImages?.[oIdx]} letter={String.fromCharCode(65 + oIdx)} onZoom={setZoomImage} />
                               {isOptionCorrect && <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />}
                               {!isOptionCorrect && isOptionSelected && <XCircle className="w-4 h-4 text-red-600 shrink-0" />}
                             </div>
@@ -357,7 +358,7 @@ export const GuestExamPreview: React.FC<Props> = ({ draft, onExitPreview }) => {
                         >
                           {String.fromCharCode(65 + optIdx)}
                         </span>
-                        <span className="text-xs sm:text-sm flex-1">{opt}</span>
+                        <OptionContent text={opt} images={question.optionImages?.[optIdx]} letter={String.fromCharCode(65 + optIdx)} onZoom={setZoomImage} />
                       </button>
                     );
                   })}

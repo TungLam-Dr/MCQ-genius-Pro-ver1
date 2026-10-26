@@ -11,6 +11,7 @@ export interface Question {
   explanationPages?: { pageNum: number; dataUrl: string }[]; // PDF answer: original page excerpts
   imageUrl?: string;
   images?: string[];
+  optionImages?: string[][]; // Images belonging to each answer choice, in option order
   sourceId?: string; // ID printed in the imported document; used for answer-key/image matching
   sourceBlock?: number;
   sourceNumber?: number;

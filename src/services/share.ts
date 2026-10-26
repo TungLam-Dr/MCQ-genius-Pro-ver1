@@ -48,6 +48,7 @@ export type PublicQuestion = {
   options: string[];
   categoryName?: string;
   images: string[];
+  optionImages?: string[][];
 };
 export type PublicExam = { id: string; title: string; timeLimitMinutes: number; questions: PublicQuestion[] };
 export type PublicSummary = { correct: number; incorrect: number; skipped: number; total: number };
@@ -63,12 +64,12 @@ export async function publishExam(draft: SharedExamDraft, secret: string, onProg
   const { id } = await jsonRequest<{ id: string }>('/new', 'POST', {}, secret);
   const uploaded = new Map<string, string>();
   const questions = [];
-  const imagesTotal = draft.questions.reduce((total, q) => total + (q.images?.length || (q.imageUrl ? 1 : 0)), 0);
+  const imagesTotal = draft.questions.reduce((total, q) => total + (q.images?.length || (q.imageUrl ? 1 : 0)) + (q.optionImages?.flat().length || 0), 0);
   let imagesDone = 0;
 
   for (const question of draft.questions) {
     const images: string[] = [];
-    for (const source of question.images?.length ? question.images : question.imageUrl ? [question.imageUrl] : []) {
+    const uploadImage = async (source: string): Promise<string> => {
       if (!uploaded.has(source)) {
         onProgress(`Đang tải ảnh ${imagesDone + 1}/${imagesTotal}...`);
         let blob: Blob;
@@ -79,10 +80,8 @@ export async function publishExam(draft: SharedExamDraft, secret: string, onProg
         } catch {
           throw new Error('Không thể đọc một ảnh trong đề. Vui lòng tải lại ảnh vào ngân hàng câu hỏi rồi thử lại.');
         }
-        if (blob.size > 20_000_000) throw new Error('Có ảnh lớn hơn 20 MB.');
-blob = await prepareShareImage(blob);
-const mime = blob.type.toLowerCase().split(';')[0];
-if (blob.size > 20_000_000) throw new Error('Có ảnh lớn hơn 20 MB.');
+        blob = await prepareShareImage(blob);
+        const mime = blob.type.toLowerCase().split(';')[0];
         if (blob.size > 20_000_000) throw new Error('Có ảnh lớn hơn 20 MB.');
         const ticket = await jsonRequest<{ signedUrl: string; imageRef: string }>(
           '/image-upload', 'POST', { examId: id, mime, bytes: blob.size }, secret
@@ -95,7 +94,16 @@ if (blob.size > 20_000_000) throw new Error('Có ảnh lớn hơn 20 MB.');
         uploaded.set(source, ticket.imageRef);
         imagesDone++;
       }
-      images.push(uploaded.get(source)!);
+      return uploaded.get(source)!;
+    };
+    for (const source of question.images?.length ? question.images : question.imageUrl ? [question.imageUrl] : []) {
+      images.push(await uploadImage(source));
+    }
+    const optionImages: string[][] = [];
+    for (const choices of question.optionImages || []) {
+      const refs: string[] = [];
+      for (const source of choices) refs.push(await uploadImage(source));
+      optionImages.push(refs);
     }
     questions.push({
       question: question.question,
@@ -103,6 +111,7 @@ if (blob.size > 20_000_000) throw new Error('Có ảnh lớn hơn 20 MB.');
       correctAnswer: question.correctAnswer,
       categoryName: question.categoryName,
       images,
+      optionImages,
     });
   }
   onProgress('Đang lưu đề và tạo link...');

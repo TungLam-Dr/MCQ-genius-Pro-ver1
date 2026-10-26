@@ -1,0 +1,486 @@
+--- a/api/shareRoutes.ts
++++ b/api/shareRoutes.ts
+@@ -15,6 +15,7 @@
+   correctAnswer: number;
+   categoryName?: string;
+   images: string[];
++  optionImages?: string[][];
+ };
+ 
+ type ExamRow = {
+@@ -60,15 +61,19 @@
+   return value.map((item: any, index): ExamQuestion => {
+     const options = item?.options;
+     const images = item?.images || [];
++    const optionImages = item?.optionImages || [];
+     if (typeof item?.question !== 'string' || !item.question.trim() || item.question.length > 15000 ||
+         !Array.isArray(options) || options.length < 2 || options.length > 10 ||
+         options.some((option: unknown) => typeof option !== 'string' || option.length > 8000) ||
+         !Number.isInteger(item.correctAnswer) || item.correctAnswer < 0 || item.correctAnswer >= options.length ||
+         !Array.isArray(images) || images.length > 12 ||
+-        images.some((image: unknown) => typeof image !== 'string' || !image.startsWith(`mcq-asset://${examId}/`))) {
++        images.some((image: unknown) => typeof image !== 'string' || !image.startsWith(`mcq-asset://${examId}/`)) ||
++        !Array.isArray(optionImages) || optionImages.length > options.length ||
++        optionImages.some((choice: unknown) => !Array.isArray(choice) || choice.length > 12 ||
++          choice.some((image: unknown) => typeof image !== 'string' || !image.startsWith(`mcq-asset://${examId}/`)))) {
+       throw new Error(`Câu ${index + 1} thiếu đáp án đúng, có dữ liệu không hợp lệ hoặc ảnh chưa được tải lên.`);
+     }
+-    assets += images.length;
++    assets += images.length + optionImages.flat().length;
+     if (assets > MAX_ASSETS) throw new Error('Đề có quá nhiều ảnh.');
+     return {
+       id: `q-${index + 1}`,
+@@ -77,13 +82,14 @@
+       correctAnswer: item.correctAnswer,
+       categoryName: typeof item.categoryName === 'string' ? item.categoryName.slice(0, 120) : '',
+       images,
++      optionImages,
+     };
+   });
+ }
+ 
+ async function publicQuestions(db: SupabaseClient, exam: ExamRow) {
+   const imageCache = new Map<string, string>();
+-  const paths = [...new Set(exam.questions.flatMap(question => question.images.map(url => url.slice('mcq-asset://'.length))))];
++  const paths = [...new Set(exam.questions.flatMap(question => [...question.images, ...(question.optionImages || []).flat()].map(url => url.slice('mcq-asset://'.length))))];
+   await Promise.all(paths.map(async path => {
+     if (!path.startsWith(`${exam.id}/`)) throw new Error('Đường dẫn ảnh không hợp lệ.');
+     const { data, error } = await db.storage.from(BUCKET).createSignedUrl(path, 86400);
+@@ -93,6 +99,7 @@
+   return exam.questions.map(({ correctAnswer: _hidden, ...question }) => ({
+     ...question,
+     images: question.images.map(url => imageCache.get(url.slice('mcq-asset://'.length))!),
++    optionImages: (question.optionImages || []).map(choice => choice.map(url => imageCache.get(url.slice('mcq-asset://'.length))!)),
+   }));
+ }
+ 
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -419,6 +419,7 @@
+       explanationPages: item.explanationPages,
+       imageUrl: item.imageUrl,
+       images: item.images,
++      optionImages: item.optionImages,
+       sourceId: item.sourceId,
+       sourceBlock: item.sourceBlock,
+       sourceNumber: item.sourceNumber,
+--- a/src/components/CategoryManager.tsx
++++ b/src/components/CategoryManager.tsx
+@@ -1,6 +1,7 @@
+ import React, { useMemo, useState } from 'react';
+ import { Category, Question, QuestionAttempt } from '../types/quiz';
+ import { CategoryTree } from './CategoryTree';
++import { OptionContent } from './OptionContent';
+ import { categoryPath, isFolder, subtreeIds } from '../utils/categoryTree';
+ import {
+   FolderPlus,
+@@ -632,7 +633,7 @@
+                         >
+                           {String.fromCharCode(65 + optIdx)}
+                         </span>
+-                        <span className="flex-1">{opt}</span>
++                        <OptionContent text={opt} images={q.optionImages?.[optIdx]} letter={String.fromCharCode(65 + optIdx)} onZoom={setPreviewZoomImage} />
+                         {isCorrect && <CheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />}
+                       </div>
+                     );
+--- a/src/components/FileUploadModal.tsx
++++ b/src/components/FileUploadModal.tsx
+@@ -2,6 +2,7 @@
+ import { Category, Question } from '../types/quiz';
+ import { categoryPath, isFolder } from '../utils/categoryTree';
+ import { parseUploadedFile, extractAnswerKeyDocument, applyAnswerKeysToQuestions, KeyMatchIssue, AnswerKeyDocument } from '../utils/fileParser';
++import { OptionContent } from './OptionContent';
+ import { parseFileWithGemini } from '../services/gemini';
+ import {
+   UploadCloud,
+@@ -123,6 +124,7 @@
+         difficulty: q?.difficulty || 'medium',
+         imageUrl: q?.imageUrl,
+         images: q?.images,
++        optionImages: q?.optionImages,
+         sourceId: q?.sourceId,
+         sourceBlock: q?.sourceBlock,
+         sourceNumber: q?.sourceNumber,
+@@ -618,7 +620,7 @@
+                             ? 'border-emerald-500 bg-emerald-50 font-bold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300'
+                             : 'border-slate-200 bg-white hover:border-indigo-400 dark:border-slate-700 dark:bg-slate-800'}`}
+                         >
+-                          {String.fromCharCode(65 + Math.min(25, Math.max(0, oIdx)))}. {typeof opt === 'string' ? opt : String(opt || '')}
++                          {String.fromCharCode(65 + Math.min(25, Math.max(0, oIdx)))}. <OptionContent text={typeof opt === 'string' ? opt : String(opt || '')} images={q.optionImages?.[oIdx]} letter={String.fromCharCode(65 + oIdx)} onZoom={setPreviewZoomImage} />
+                         </button>
+                       ))}
+                     </div>
+--- a/src/components/GuestExamPreview.tsx
++++ b/src/components/GuestExamPreview.tsx
+@@ -14,6 +14,7 @@
+ } from 'lucide-react';
+ import type { SharedExamDraft } from '../types/quiz';
+ import { formatTimeMinutesSeconds } from '../utils/quizEngine';
++import { OptionContent } from './OptionContent';
+ 
+ interface Props {
+   draft: SharedExamDraft;
+@@ -272,7 +273,7 @@
+                               <span className="w-5 h-5 rounded-md bg-black/10 dark:bg-white/10 flex items-center justify-center font-bold text-[10px] shrink-0">
+                                 {String.fromCharCode(65 + oIdx)}
+                               </span>
+-                              <span className="flex-1">{opt}</span>
++                              <OptionContent text={opt} images={q.optionImages?.[oIdx]} letter={String.fromCharCode(65 + oIdx)} onZoom={setZoomImage} />
+                               {isOptionCorrect && <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />}
+                               {!isOptionCorrect && isOptionSelected && <XCircle className="w-4 h-4 text-red-600 shrink-0" />}
+                             </div>
+@@ -357,7 +358,7 @@
+                         >
+                           {String.fromCharCode(65 + optIdx)}
+                         </span>
+-                        <span className="text-xs sm:text-sm flex-1">{opt}</span>
++                        <OptionContent text={opt} images={question.optionImages?.[optIdx]} letter={String.fromCharCode(65 + optIdx)} onZoom={setZoomImage} />
+                       </button>
+                     );
+                   })}
+--- a/src/components/PublicExamPage.tsx
++++ b/src/components/PublicExamPage.tsx
+@@ -1,6 +1,7 @@
+ import React, { useCallback, useEffect, useRef, useState } from 'react';
+ import { ArrowLeft, ArrowRight, Clock3, Send } from 'lucide-react';
+ import { getPublicExam, resumePublicExam, startPublicExam, submitPublicExam, type PublicExam, type PublicSummary } from '../services/share';
++import { OptionContent } from './OptionContent';
+ 
+ export default function PublicExamPage({ examId }: { examId: string }) {
+   const [exam, setExam] = useState<PublicExam | null>(null);
+@@ -142,7 +143,7 @@
+                 {question.options.map((option, i) => (
+                   <button key={i} type="button" disabled={busy || secondsLeft <= 0} onClick={() => choose(question.id, i)}
+                     className={`min-h-12 rounded-xl border-2 px-4 py-3 text-left transition-colors ${answers[question.id] === i ? 'border-indigo-600 bg-indigo-50 text-indigo-900' : 'border-slate-200 hover:border-indigo-300'} disabled:opacity-60`}>
+-                    <strong className="mr-3">{String.fromCharCode(65 + i)}.</strong>{option}
++                    <strong className="mr-3">{String.fromCharCode(65 + i)}.</strong><OptionContent text={option} images={question.optionImages?.[i]} letter={String.fromCharCode(65 + i)} />
+                   </button>
+                 ))}
+               </div>
+--- a/src/components/QuestionBrowser.tsx
++++ b/src/components/QuestionBrowser.tsx
+@@ -4,6 +4,7 @@
+ import { isQuestionValid } from '../utils/quizEngine';
+ import { categoryPath, isFolder, subtreeIds } from '../utils/categoryTree';
+ import { AnswerExplanation } from './AnswerExplanation';
++import { OptionContent } from './OptionContent';
+ 
+ type Status = 'all' | 'flagged' | 'review' | 'mistaken' | 'unattempted' | 'attempted' | 'today' | 'unanswered' | 'images';
+ type QuestionChanges = Pick<Question, 'question' | 'options' | 'correctAnswer' | 'explanation' | 'manualExplanation' | 'tags'>;
+@@ -251,7 +252,7 @@
+             <div className="space-y-2">{selected.options.map((option, index) => {
+               const shown = previewMode ? previewSubmitted : revealAnswer;
+               const style = shown && index === selected.correctAnswer ? 'border-emerald-500 bg-emerald-50 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200' : previewMode && previewChoice === index ? 'border-indigo-500 bg-indigo-50 text-indigo-900 dark:bg-indigo-950 dark:text-indigo-100' : 'border-slate-200 dark:border-slate-700';
+-              return previewMode ? <button key={index} type="button" disabled={previewSubmitted || !isQuestionValid(selected)} onClick={() => setPreviewChoice(index)} aria-pressed={previewChoice === index} className={`min-h-11 w-full rounded-xl border p-3 text-left text-sm disabled:cursor-default ${style}`}><strong className="mr-2">{String.fromCharCode(65 + index)}.</strong>{option}</button> : <div key={index} className={`rounded-xl border p-3 text-sm ${style}`}><strong className="mr-2">{String.fromCharCode(65 + index)}.</strong>{option}</div>;
++              return previewMode ? <button key={index} type="button" disabled={previewSubmitted || !isQuestionValid(selected)} onClick={() => setPreviewChoice(index)} aria-pressed={previewChoice === index} className={`min-h-11 w-full rounded-xl border p-3 text-left text-sm disabled:cursor-default ${style}`}><strong className="mr-2">{String.fromCharCode(65 + index)}.</strong><OptionContent text={option} images={selected.optionImages?.[index]} letter={String.fromCharCode(65 + index)} onZoom={setZoom} /></button> : <div key={index} className={`rounded-xl border p-3 text-sm ${style}`}><strong className="mr-2">{String.fromCharCode(65 + index)}.</strong><OptionContent text={option} images={selected.optionImages?.[index]} letter={String.fromCharCode(65 + index)} onZoom={setZoom} /></div>;
+             })}</div>
+             {previewMode ? <div className="space-y-2"><button type="button" disabled={previewChoice === null || previewSubmitted || !isQuestionValid(selected)} onClick={() => setPreviewSubmitted(true)} className="min-h-11 rounded-xl bg-indigo-600 px-4 text-sm font-bold text-white disabled:opacity-40">Nộp thử</button>{previewSubmitted && <p role="status" className="rounded-xl bg-slate-100 p-3 text-sm font-bold dark:bg-slate-700">{previewChoice === selected.correctAnswer ? 'Bạn đã chọn đúng.' : `Bạn chọn ${String.fromCharCode(65 + (previewChoice ?? 0))}. Đáp án đúng: ${String.fromCharCode(65 + selected.correctAnswer)}.`} Lần thử này không ghi vào Analyze.</p>}</div>
+               : <div className="flex flex-wrap gap-2"><button type="button" onClick={() => setRevealAnswer(!revealAnswer)} disabled={!isQuestionValid(selected)} className="min-h-11 rounded-xl bg-indigo-600 px-4 text-sm font-bold text-white disabled:opacity-40"><BookOpen size={16} className="mr-1 inline" />{revealAnswer ? 'Ẩn đáp án' : 'Xem đáp án và lời giải'}</button><button type="button" onClick={() => openEditor(selected)} className="min-h-11 rounded-xl border border-indigo-300 px-4 text-sm font-bold text-indigo-700 dark:text-indigo-300"><Pencil size={15} className="mr-1 inline" />Sửa câu hỏi</button></div>}
+--- a/src/components/StudyReview.tsx
++++ b/src/components/StudyReview.tsx
+@@ -6,6 +6,7 @@
+ import { categoryPath, isFolder, subtreeIds } from '../utils/categoryTree';
+ import { getStorageItem, setStorageItem } from '../utils/storage';
+ import { AnswerExplanation } from './AnswerExplanation';
++import { OptionContent } from './OptionContent';
+ 
+ type FilterStatus = 'all' | 'due' | 'overdue' | 'new' | 'learning' | 'review' | 'flagged' | 'mistaken' | 'today' | 'suspended' | 'buried';
+ type QuestionChanges = Pick<Question, 'question' | 'options' | 'correctAnswer' | 'explanation' | 'manualExplanation' | 'tags'>;
+@@ -228,7 +229,7 @@
+       <section className="space-y-3"><h2 className="text-lg font-bold">Danh sách câu hỏi ({visible.length})</h2>{visible.slice(0, 100).map(q => <article key={q.id} className={`${panelClass} space-y-3`}><div className="flex flex-wrap items-start justify-between gap-2"><div className="min-w-0 flex-1"><p className="text-xs font-bold text-indigo-600 dark:text-indigo-300">{q.sourceBlock != null ? `Block ${q.sourceBlock} · ` : ''}{q.categoryName} · Câu {q.sourceNumber || q.sourceId || '—'}</p><p className="mt-1 text-sm font-semibold line-clamp-3">{q.question}</p></div><span className="rounded-lg bg-slate-100 px-2 py-1 text-xs dark:bg-slate-700">{suspended[q.id] ? 'Tạm ẩn' : activeBury(q.id) ? 'Ẩn hôm nay' : isReviewDue(schedules[q.id], clock) ? 'Đến hạn' : schedules[q.id] ? 'Đã lên lịch' : 'Chưa lên lịch'}</span></div><p className="text-xs text-slate-500">Đã làm {stats.get(q.id)?.total || 0} lần · Sai {stats.get(q.id)?.wrong || 0} lần {q.images?.length || q.imageUrl ? ' · Có hình' : ''}{!isQuestionValid(q) ? ' · Chưa có đáp án' : ''}</p><button type="button" onClick={() => start([q.id])} disabled={!isQuestionValid(q) || !!suspended[q.id] || activeBury(q.id)} className="min-h-11 rounded-xl bg-indigo-600 px-3 text-xs font-bold text-white disabled:opacity-40">Ôn câu này</button>{flagTools(q)}{controls(q)}{tagTools(q)}</article>)}{visible.length > 100 && <p className="text-center text-sm text-slate-500">Đang hiển thị 100 câu đầu. Hãy chọn Block, mục hoặc dùng tìm kiếm để thu hẹp danh sách.</p>}{!visible.length && <p className={panelClass}>Không có câu hỏi phù hợp với bộ lọc.</p>}</section>
+     </> : completed ? <section className={`${panelClass} space-y-4 text-center`}><h2 className="text-xl font-bold">Hoàn thành phiên ôn</h2><p>Đã ôn {sessionStats.done} câu · Chọn đúng {sessionStats.right} câu</p><p className="text-sm text-slate-500">Các câu sẽ trở lại khi đến hạn theo mức độ bạn đã chọn.</p><button type="button" onClick={() => setQueue(null)} className="min-h-11 rounded-xl bg-indigo-600 px-5 font-bold text-white">Trở về Ôn tập</button></section> : current ? <section className="space-y-4">
+       <div className={panelClass}><div className="flex items-center justify-between gap-2"><p className="text-xs font-bold text-indigo-600 dark:text-indigo-300">Câu {position + 1}/{queue.length} · {current.categoryName} · {current.sourceBlock != null ? `Block ${current.sourceBlock}` : 'Chưa có Block'}</p><button type="button" onClick={next} className="min-h-11 shrink-0 rounded-xl border px-3 text-xs font-semibold">Bỏ qua</button></div><div className="mt-3 text-lg font-bold leading-relaxed">{current.question}</div>{(current.images?.length ? current.images : current.imageUrl ? [current.imageUrl] : []).map((src, index) => <button key={index} type="button" onClick={() => setZoom(src)} className="mt-3 block w-full rounded-xl border p-2 dark:border-slate-700"><img src={src} alt={`Hình minh họa ${index + 1}`} loading="lazy" className="max-h-80 w-full object-contain" /></button>)}</div>
+-      <div className={`${panelClass} space-y-2`}>{current.options.map((option, index) => <button type="button" key={index} disabled={revealed} aria-pressed={choice === index} onClick={() => setChoice(index)} className={`min-h-11 w-full rounded-xl border p-3 text-left text-sm transition-colors ${revealed && index === current.correctAnswer ? 'border-emerald-500 bg-emerald-50 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200' : choice === index ? 'border-indigo-500 bg-indigo-50 text-indigo-900 dark:bg-indigo-950 dark:text-indigo-200' : 'border-slate-200 dark:border-slate-700'}`}><strong className="mr-2">{String.fromCharCode(65 + index)}.</strong>{option}</button>)}</div>
++      <div className={`${panelClass} space-y-2`}>{current.options.map((option, index) => <button type="button" key={index} disabled={revealed} aria-pressed={choice === index} onClick={() => setChoice(index)} className={`min-h-11 w-full rounded-xl border p-3 text-left text-sm transition-colors ${revealed && index === current.correctAnswer ? 'border-emerald-500 bg-emerald-50 text-emerald-900 dark:bg-emerald-950 dark:text-emerald-200' : choice === index ? 'border-indigo-500 bg-indigo-50 text-indigo-900 dark:bg-indigo-950 dark:text-indigo-200' : 'border-slate-200 dark:border-slate-700'}`}><strong className="mr-2">{String.fromCharCode(65 + index)}.</strong><OptionContent text={option} images={current.optionImages?.[index]} letter={String.fromCharCode(65 + index)} onZoom={setZoom} /></button>)}</div>
+       {!revealed ? <div className="sticky bottom-2 z-10 rounded-2xl bg-white/95 p-3 shadow-xl backdrop-blur dark:bg-slate-900/95"><button type="button" onClick={() => setRevealed(true)} className="min-h-12 w-full rounded-xl bg-amber-600 px-5 font-bold text-white">Xem đáp án và lời giải</button><p className="mt-1 text-center text-xs text-slate-500">Có thể tự nghĩ đáp án rồi xem lời giải, kể cả khi chưa chọn phương án.</p></div> : <><div className={`${panelClass} space-y-3`}><h2 className="font-bold text-emerald-700 dark:text-emerald-300">Đáp án: {String.fromCharCode(65 + current.correctAnswer)}. {current.options[current.correctAnswer]}</h2><p className="text-sm">{choice === null ? 'Bạn chưa chọn phương án.' : choice === current.correctAnswer ? 'Bạn đã chọn đúng.' : 'Bạn đã chọn sai.'}</p><AnswerExplanation key={current.id} question={current} onZoom={setZoom} /></div><div className={`${panelClass} space-y-3`}>{flagTools(current)}{controls(current)}{tagTools(current)}</div><div className="sticky bottom-2 z-10 rounded-2xl border bg-white/95 p-3 shadow-xl backdrop-blur dark:border-slate-700 dark:bg-slate-900/95"><p className="mb-2 text-center text-xs font-bold">Mức độ nhớ câu này · Chọn để lưu lịch ôn và sang câu tiếp</p><div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{grades.map(item => <button key={item.id} type="button" onClick={() => grade(item.id)} className={`min-h-12 rounded-xl border-2 px-2 text-sm font-bold ${item.style}`}>{item.label}<span className="ml-1 text-xs font-normal">{item.caption}</span></button>)}</div></div></>}
+     </section> : <section className={panelClass}><p>Câu hỏi đã bị xóa khỏi ngân hàng.</p><button type="button" onClick={next} className="min-h-11 text-indigo-600 underline">Bỏ qua</button></section>}
+ 
+--- a/src/components/TestBlockCreator.tsx
++++ b/src/components/TestBlockCreator.tsx
+@@ -1,4 +1,5 @@
+ import React, { useState } from 'react';
++import { OptionContent } from './OptionContent';
+ import { categoryPath, isFolder } from '../utils/categoryTree';
+ import { Category, CategorySelection, Question, TestConfig } from '../types/quiz';
+ import { generateQuestionsWithGemini } from '../services/gemini';
+@@ -687,7 +688,7 @@
+                           <span className="w-5 h-5 rounded-md bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-bold flex items-center justify-center shrink-0 text-[10px]">
+                             {String.fromCharCode(65 + oIdx)}
+                           </span>
+-                          <span className="flex-1">{opt}</span>
++                          <OptionContent text={opt} images={q.optionImages?.[oIdx]} letter={String.fromCharCode(65 + oIdx)} onZoom={setPreviewZoomImage} />
+                         </div>
+                       ))}
+                     </div>
+--- a/src/components/TestResultView.tsx
++++ b/src/components/TestResultView.tsx
+@@ -3,6 +3,7 @@
+ import { Question, TestResult } from '../types/quiz';
+ import { GeminiDebateDrawer } from './GeminiDebateDrawer';
+ import { AnswerExplanation } from './AnswerExplanation';
++import { OptionContent } from './OptionContent';
+ import type { ReviewFilter } from './TestHistoryView';
+ import { formatTimeMinutesSeconds } from '../utils/quizEngine';
+ import {
+@@ -381,7 +382,7 @@
+                         >
+                           {String.fromCharCode(65 + optIdx)}
+                         </span>
+-                        <span className="flex-1 leading-6">{opt}</span>
++                        <OptionContent text={opt} images={q.optionImages?.[optIdx]} letter={String.fromCharCode(65 + optIdx)} onZoom={setZoomImage} />
+                         {isUserChoice && <span className="text-[10px] italic text-indigo-500 font-normal">(Lựa chọn của bạn)</span>}
+                       </div>
+                     );
+--- a/src/components/TestRunner.tsx
++++ b/src/components/TestRunner.tsx
+@@ -1,5 +1,6 @@
+ import React, { useState, useEffect, useRef } from 'react';
+ import { Question, TestConfig } from '../types/quiz';
++import { OptionContent } from './OptionContent';
+ import { formatTimeMinutesSeconds } from '../utils/quizEngine';
+ import {
+   Clock,
+@@ -302,7 +303,7 @@
+                     >
+                       {letter}
+                     </span>
+-                    <span className="text-sm font-medium leading-relaxed pt-0.5 flex-1">{option}</span>
++                    <OptionContent text={option} images={currentQuestion.optionImages?.[optIndex]} letter={letter} onZoom={setZoomImage} />
+                   </button>
+                 );
+               })}
+--- /dev/null
++++ b/src/components/OptionContent.tsx
+@@ -0,0 +1,24 @@
++import type { MouseEvent } from 'react';
++
++/** Works inside answer buttons as well as read-only answer cards. */
++export function OptionContent({ text, images, letter, onZoom }: {
++  text: string;
++  images?: string[];
++  letter: string;
++  onZoom?: (src: string) => void;
++}) {
++  const zoom = (event: MouseEvent<HTMLImageElement>, src: string) => {
++    if (!onZoom) return;
++    event.preventDefault();
++    event.stopPropagation();
++    onZoom(src);
++  };
++  return <span className="block min-w-0 flex-1">
++    {text && text !== 'Hình ảnh' ? <span className="block">{text}</span> : null}
++    {images?.map((src, index) => <img key={index} src={src}
++      alt={`Hình trong đáp án ${letter}${images.length > 1 ? `, ảnh ${index + 1}` : ''}`}
++      loading="lazy" onClick={event => zoom(event, src)}
++      className="mt-2 max-h-56 max-w-full rounded-lg border border-slate-200 bg-white object-contain dark:border-slate-700" />)}
++    {!images?.length && !text ? <span>Không đọc được nội dung đáp án</span> : null}
++  </span>;
++}
+--- a/src/services/share.ts
++++ b/src/services/share.ts
+@@ -48,6 +48,7 @@
+   options: string[];
+   categoryName?: string;
+   images: string[];
++  optionImages?: string[][];
+ };
+ export type PublicExam = { id: string; title: string; timeLimitMinutes: number; questions: PublicQuestion[] };
+ export type PublicSummary = { correct: number; incorrect: number; skipped: number; total: number };
+@@ -63,12 +64,12 @@
+   const { id } = await jsonRequest<{ id: string }>('/new', 'POST', {}, secret);
+   const uploaded = new Map<string, string>();
+   const questions = [];
+-  const imagesTotal = draft.questions.reduce((total, q) => total + (q.images?.length || (q.imageUrl ? 1 : 0)), 0);
++  const imagesTotal = draft.questions.reduce((total, q) => total + (q.images?.length || (q.imageUrl ? 1 : 0)) + (q.optionImages?.flat().length || 0), 0);
+   let imagesDone = 0;
+ 
+   for (const question of draft.questions) {
+     const images: string[] = [];
+-    for (const source of question.images?.length ? question.images : question.imageUrl ? [question.imageUrl] : []) {
++    const uploadImage = async (source: string): Promise<string> => {
+       if (!uploaded.has(source)) {
+         onProgress(`Đang tải ảnh ${imagesDone + 1}/${imagesTotal}...`);
+         let blob: Blob;
+@@ -79,10 +80,8 @@
+         } catch {
+           throw new Error('Không thể đọc một ảnh trong đề. Vui lòng tải lại ảnh vào ngân hàng câu hỏi rồi thử lại.');
+         }
+-        if (blob.size > 20_000_000) throw new Error('Có ảnh lớn hơn 20 MB.');
+-blob = await prepareShareImage(blob);
+-const mime = blob.type.toLowerCase().split(';')[0];
+-if (blob.size > 20_000_000) throw new Error('Có ảnh lớn hơn 20 MB.');
++        blob = await prepareShareImage(blob);
++        const mime = blob.type.toLowerCase().split(';')[0];
+         if (blob.size > 20_000_000) throw new Error('Có ảnh lớn hơn 20 MB.');
+         const ticket = await jsonRequest<{ signedUrl: string; imageRef: string }>(
+           '/image-upload', 'POST', { examId: id, mime, bytes: blob.size }, secret
+@@ -95,7 +94,16 @@
+         uploaded.set(source, ticket.imageRef);
+         imagesDone++;
+       }
+-      images.push(uploaded.get(source)!);
++      return uploaded.get(source)!;
++    };
++    for (const source of question.images?.length ? question.images : question.imageUrl ? [question.imageUrl] : []) {
++      images.push(await uploadImage(source));
++    }
++    const optionImages: string[][] = [];
++    for (const choices of question.optionImages || []) {
++      const refs: string[] = [];
++      for (const source of choices) refs.push(await uploadImage(source));
++      optionImages.push(refs);
+     }
+     questions.push({
+       question: question.question,
+@@ -103,6 +111,7 @@
+       correctAnswer: question.correctAnswer,
+       categoryName: question.categoryName,
+       images,
++      optionImages,
+     });
+   }
+   onProgress('Đang lưu đề và tạo link...');
+--- a/src/types/quiz.ts
++++ b/src/types/quiz.ts
+@@ -11,6 +11,7 @@
+   explanationPages?: { pageNum: number; dataUrl: string }[]; // PDF answer: original page excerpts
+   imageUrl?: string;
+   images?: string[];
++  optionImages?: string[][]; // Images belonging to each answer choice, in option order
+   sourceId?: string; // ID printed in the imported document; used for answer-key/image matching
+   sourceBlock?: number;
+   sourceNumber?: number;
+--- a/src/utils/fileParser.ts
++++ b/src/utils/fileParser.ts
+@@ -233,7 +233,8 @@
+ 
+     // First use line-start labels. A second pass supports compact files with
+     // "A. ... B. ..." on one line without mistaking prose for options.
+-    const lineOption = /^[ \t]*([A-J])[.):/-][ \t]+/gim;
++    // Word can put the whole answer in an image directly after a bare "A.".
++    const lineOption = /^[ \t]*([A-J])[.):/-](?:[ \t]+|(?=\r?$))/gim;
+     let optionMarkers = [...block.matchAll(lineOption)];
+     if (optionMarkers.length < 2) {
+       optionMarkers = [...block.matchAll(/(?<!\S)([A-J])[.):/-][ \t]+/gim)];
+@@ -382,6 +383,38 @@
+   return { updatedQuestions, matchedCount, verifiedCount, reviewMatches, unresolved };
+ }
+ 
++/** Keep Word image positions: stem figures and each choice have separate owners. */
++export function attachDocxImagesToQuestions(questions: Partial<Question>[], images: string[]): void {
++  const marker = /\[\[MCQ_IMAGE_(\d+)\]\]/g;
++  const takeImages = (value: string): string[] => [...value.matchAll(marker)]
++    .map(match => images[Number(match[1])]).filter((src): src is string => !!src);
++  for (const question of questions) {
++    const stem = question.question || '';
++    question.images = takeImages(stem);
++    question.imageUrl = question.images[0];
++    question.question = stem.replace(marker, '').replace(/\s+/g, ' ').trim();
++    question.optionImages = (question.options || []).map(option => takeImages(option));
++    question.options = (question.options || []).map((option, index) => {
++      const cleaned = option.replace(marker, '').replace(/\s+/g, ' ').trim();
++      return cleaned || (question.optionImages?.[index]?.length ? 'Hình ảnh' : '');
++    });
++  }
++}
++
++export function parseDocxQuestionHtml(html: string, detectedImages: string[]): {rawText: string; questions: Partial<Question>[]} {
++  let imageIndex = 0;
++  const rawText = html
++    .replace(/<img\b[^>]*>/gi, () => `\n[[MCQ_IMAGE_${imageIndex++}]]\n`)
++    .replace(/<br\s*\/?\s*>/gi, '\n')
++    .replace(/<\/(?:p|div|li|tr|h[1-6])>/gi, '\n')
++    .replace(/<[^>]*>/g, '')
++    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
++    .replace(/&lt;/g, '<').replace(/&gt;/g, '>');
++  const questions = parseTextToStructuredQuestions(rawText);
++  attachDocxImagesToQuestions(questions, detectedImages);
++  return {rawText,questions};
++}
++
+ export async function parseUploadedFile(file: File | { name: string; buffer: ArrayBuffer }): Promise<ParsedFileResult> {
+   const fileName = file.name;
+   const ext = fileName.split('.').pop()?.toLowerCase();
+@@ -421,32 +454,18 @@
+       { arrayBuffer },
+       {
+         convertImage: mammoth.images.imgElement((image) => {
++          const index = detectedImages.length;
++          detectedImages.push(''); // Reserve position before asynchronous image reads finish.
+           return image.read('base64').then((imageBuffer) => {
+             const src = `data:${image.contentType};base64,${imageBuffer}`;
+-            detectedImages.push(src);
++            detectedImages[index] = src;
+             return { src };
+           });
+         }),
+       }
+     );
+ 
+-    let imageIndex = 0;
+-    const rawText = result.value
+-      .replace(/<img\b[^>]*>/gi, () => `\n[[MCQ_IMAGE_${imageIndex++}]]\n`)
+-      .replace(/<br\s*\/?\s*>/gi, '\n')
+-      .replace(/<\/(?:p|div|li|tr|h[1-6])>/gi, '\n')
+-      .replace(/<[^>]*>/g, '')
+-      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+-      .replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+-    const parsedQuestions = parseTextToStructuredQuestions(rawText);
+-    for (const q of parsedQuestions) {
+-      const combined = [q.question || '', ...(q.options || [])].join(' ');
+-      const indices = [...combined.matchAll(/\[\[MCQ_IMAGE_(\d+)\]\]/g)].map(m => Number(m[1]));
+-      q.images = indices.map(i => detectedImages[i]).filter(Boolean);
+-      q.imageUrl = q.images[0];
+-      q.question = q.question?.replace(/\[\[MCQ_IMAGE_\d+\]\]/g, '').trim();
+-      q.options = q.options?.map(o => o.replace(/\[\[MCQ_IMAGE_\d+\]\]/g, '').trim());
+-    }
++    const { rawText, questions: parsedQuestions } = parseDocxQuestionHtml(result.value, detectedImages);
+ 
+     return {
+       fileName,
+--- a/src/utils/fileParser.test.ts
++++ b/src/utils/fileParser.test.ts
+@@ -1,6 +1,23 @@
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+-import { parseTextToStructuredQuestions, parseAnswerKeysFromText, applyAnswerKeysToQuestions } from './fileParser';
++import { parseTextToStructuredQuestions, parseAnswerKeysFromText, applyAnswerKeysToQuestions, parseDocxQuestionHtml } from './fileParser';
++import { selectQuestionsForBlock } from './quizEngine';
++import type { Question, TestConfig } from '../types/quiz';
++
++test('Word question with image-only A–E options keeps each image in its own choice after shuffling', () => {
++  const images = ['a', 'b', 'c', 'd', 'e'].map(letter => `data:image/png;base64,${letter}`);
++  const html = `<p>Câu 6 ID: 20288 Chọn hình đúng?</p>${images.map((_, i) => `<p>${String.fromCharCode(65 + i)}.<img src="image-${i}" /></p>`).join('')}<p>Câu 7 ID: 1967 Câu tiếp?</p><p>A. Một</p><p>B. Hai</p>`;
++  const {questions} = parseDocxQuestionHtml(html, images);
++  assert.equal(questions.length, 2);
++  assert.deepEqual(questions[0].optionImages, images.map(image => [image]));
++  assert.deepEqual(questions[0].options, Array(5).fill('Hình ảnh'));
++  assert.deepEqual(questions[0].images, []);
++  const question = {...questions[0], id:'q6', categoryId:'c', categoryName:'Test', correctAnswer:2} as Question;
++  const config = { selectionMode:'random', categorySelections:[], totalQuestions:1, shuffleQuestions:false, shuffleOptions:true } as unknown as TestConfig;
++  const [shuffled] = selectQuestionsForBlock([question], config);
++  assert.equal(shuffled.optionImages?.[shuffled.correctAnswer]?.[0], images[2]);
++  assert.deepEqual(shuffled.optionImages?.flat().sort(), [...images].sort());
++});
+ 
+ test('parseTextToStructuredQuestions handles Viet-USMLE PDF format with ID tags and 5 options', () => {
+   const samplePdfText = `
+--- a/src/utils/quizEngine.ts
++++ b/src/utils/quizEngine.ts
+@@ -77,14 +77,14 @@
+   return selected.map((q) => {
+     if (!config.shuffleOptions || q.options.length <= 1) return { ...q };
+ 
+-    const originalCorrectOption = q.options[q.correctAnswer];
+-    const indexedOptions = q.options.map((opt, idx) => ({ opt, isCorrect: idx === q.correctAnswer }));
++    const indexedOptions = q.options.map((opt, idx) => ({ opt, images: q.optionImages?.[idx] || [], isCorrect: idx === q.correctAnswer }));
+     const shuffledIndexed = shuffleArray(indexedOptions);
+     const newCorrectIndex = shuffledIndexed.findIndex((item) => item.isCorrect);
+ 
+     return {
+       ...q,
+       options: shuffledIndexed.map((item) => item.opt),
++      optionImages: shuffledIndexed.map((item) => item.images),
+       correctAnswer: newCorrectIndex,
+     };
+   });

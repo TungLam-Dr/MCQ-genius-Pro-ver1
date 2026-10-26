@@ -3,6 +3,7 @@ import confetti from 'canvas-confetti';
 import { Question, TestResult } from '../types/quiz';
 import { GeminiDebateDrawer } from './GeminiDebateDrawer';
 import { AnswerExplanation } from './AnswerExplanation';
+import { OptionContent } from './OptionContent';
 import type { ReviewFilter } from './TestHistoryView';
 import { formatTimeMinutesSeconds } from '../utils/quizEngine';
 import {
@@ -381,7 +382,7 @@ export const TestResultView: React.FC<TestResultViewProps> = ({
                         >
                           {String.fromCharCode(65 + optIdx)}
                         </span>
-                        <span className="flex-1 leading-6">{opt}</span>
+                        <OptionContent text={opt} images={q.optionImages?.[optIdx]} letter={String.fromCharCode(65 + optIdx)} onZoom={setZoomImage} />
                         {isUserChoice && <span className="text-[10px] italic text-indigo-500 font-normal">(Lựa chọn của bạn)</span>}
                       </div>
                     );

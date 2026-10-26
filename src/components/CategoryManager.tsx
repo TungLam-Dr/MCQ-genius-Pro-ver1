@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Category, Question, QuestionAttempt } from '../types/quiz';
 import { CategoryTree } from './CategoryTree';
+import { OptionContent } from './OptionContent';
 import { categoryPath, isFolder, subtreeIds } from '../utils/categoryTree';
 import {
   FolderPlus,
@@ -632,7 +633,7 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
                         >
                           {String.fromCharCode(65 + optIdx)}
                         </span>
-                        <span className="flex-1">{opt}</span>
+                        <OptionContent text={opt} images={q.optionImages?.[optIdx]} letter={String.fromCharCode(65 + optIdx)} onZoom={setPreviewZoomImage} />
                         {isCorrect && <CheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />}
                       </div>
                     );
