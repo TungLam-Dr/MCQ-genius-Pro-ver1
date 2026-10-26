@@ -37,6 +37,7 @@ export function selectQuestionsForBlock(
   // STRICT FILTER: Only questions WITH VALID ANSWERS can enter test/exam mode
   const validQuestions = allQuestions.filter(isQuestionValid);
   if (validQuestions.length === 0) return [];
+  if (config.selectionMode === 'categories' && config.categorySelections.length === 0) return [];
 
   let selected: Question[] = [];
 
@@ -49,14 +50,7 @@ export function selectQuestionsForBlock(
       selected.push(...picked);
     }
 
-    // If requested total exceeds category picks or custom padding requested, pad from remaining valid
-    if (selected.length < config.totalQuestions && validQuestions.length > selected.length) {
-      const selectedIds = new Set(selected.map((q) => q.id));
-      const remaining = validQuestions.filter((q) => !selectedIds.has(q.id));
-      const needed = config.totalQuestions - selected.length;
-      const extraPicked = shuffleArray(remaining).slice(0, needed);
-      selected.push(...extraPicked);
-    }
+    // A source selection is strict: never fill a short preset with questions from other categories.
   } else {
     // Random selection across all available valid questions
     const shuffled = shuffleArray(validQuestions);

@@ -73,6 +73,18 @@ test('selectQuestionsForBlock handles category specific counts', () => {
   assert.equal(cat2Count, 2);
 });
 
+test('a preset never pads selected categories with questions from another category', () => {
+  const config: TestConfig = {
+    title: 'Chỉ Toán', presetType: '40q_30m', totalQuestions: 40, timeLimitMinutes: 30,
+    selectionMode: 'categories', categorySelections: [
+      { categoryId: 'cat1', categoryName: 'Toán', availableCount: 2, requestedCount: 1 },
+    ], shuffleQuestions: false, shuffleOptions: false,
+  };
+  const selected = selectQuestionsForBlock(mockQuestions, config);
+  assert.equal(selected.length, 1);
+  assert.ok(selected.every(question => question.categoryId === 'cat1'));
+});
+
 test('calculateTestResult calculates score and accuracy correctly', () => {
   const userAnswers = {
     q1: 1, // correct
