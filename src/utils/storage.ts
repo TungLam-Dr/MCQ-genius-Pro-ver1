@@ -1,4 +1,5 @@
 import type { Question } from '../types/quiz';
+import type { CloudSnapshot } from '../services/cloudSync';
 
 const DB_NAME = 'mcq_genius_db';
 const DB_VERSION = 2;
@@ -91,6 +92,25 @@ export async function setStorageItem<T>(key: string, value: T): Promise<void> {
   const done = complete(tx);
   tx.objectStore(DATA_STORE).put(value, key);
   await done;
+}
+
+/** Replace the offline bank and its metadata in one IndexedDB transaction. */
+export async function replaceStoredSnapshot(values: CloudSnapshot): Promise<void> {
+  const db = await openDB();
+  const tx = db.transaction([DATA_STORE, QUESTION_STORE], 'readwrite');
+  const done = complete(tx);
+  const data = tx.objectStore(DATA_STORE);
+  const questions = tx.objectStore(QUESTION_STORE);
+  questions.clear();
+  for (const question of values.mcq_genius_questions) questions.put(question);
+  data.put(values.mcq_genius_questions.map(q => q.id), ORDER_KEY);
+  data.put(true, READY_KEY);
+  data.delete(QUESTIONS_KEY);
+  for (const [key, value] of Object.entries(values)) {
+    if (key !== QUESTIONS_KEY) data.put(value, key);
+  }
+  await done;
+  previousQuestions = new Map(values.mcq_genius_questions.map(q => [q.id, q]));
 }
 
 /** Imports legacy localStorage once. Never discards old data before the IndexedDB commit. */
