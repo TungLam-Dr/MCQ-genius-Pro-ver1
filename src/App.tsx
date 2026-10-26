@@ -8,8 +8,10 @@ import { setStorageItem, getStorageItem, replaceStoredSnapshot } from './utils/s
 import type { CloudSnapshot } from './services/cloudSync';
 import { scheduleReview } from './utils/reviewScheduler';
 import { canMoveCategory, isFolder } from './utils/categoryTree';
+import { heatmapThemes, type HeatmapTheme } from './utils/reviewHeatmap';
 import { Navbar } from './components/Navbar';
 import { CategoryManager } from './components/CategoryManager';
+import { ReviewHeatmap } from './components/ReviewHeatmap';
 import { TestHistoryView, type ReviewFilter } from './components/TestHistoryView';
 import { GoatCountdownModal } from './components/GoatCountdownModal';
 import { SharedExamDrafts } from './components/SharedExamDrafts';
@@ -47,6 +49,7 @@ export default function App() {
   const [questions, setQuestions] = useState<Question[]>(INITIAL_QUESTIONS);
   const [testHistory, setTestHistory] = useState<TestResult[]>([]);
   const [questionAttempts, setQuestionAttempts] = useState<QuestionAttempt[]>([]);
+  const [heatmapTheme, setHeatmapTheme] = useState<HeatmapTheme>('classic');
   const [studyFlags, setStudyFlags] = useState<Record<string, boolean>>({});
   const [studyFlagColors, setStudyFlagColors] = useState<Record<string, StudyFlagColor>>({});
   const [reviewSchedule, setReviewSchedule] = useState<Record<string, ReviewSchedule>>({});
@@ -75,14 +78,14 @@ export default function App() {
   const [resultFilter, setResultFilter] = useState<ReviewFilter>('all');
   const [viewingSavedResult, setViewingSavedResult] = useState(false);
   const [resultReturnTab, setResultReturnTab] = useState<'history' | 'analyze'>('history');
-  const syncChange = useMemo(() => ({}), [categories, questions, testHistory, questionAttempts, shareDrafts, studyFlags, studyFlagColors, reviewSchedule, suspendedQuestions, buriedQuestions]);
+  const syncChange = useMemo(() => ({}), [categories, questions, testHistory, questionAttempts, shareDrafts, studyFlags, studyFlagColors, reviewSchedule, suspendedQuestions, buriedQuestions, heatmapTheme]);
 
   // Hydrate full data from IndexedDB on initial mount
   useEffect(() => {
     let isMounted = true;
     async function hydrateFromStorage() {
       try {
-        const [idbCats, idbQuestions, idbHistory, savedAttempts, idbShareDrafts, savedFlags, savedColors, savedSchedule, savedSuspended, savedBuried] = await Promise.all([
+        const [idbCats, idbQuestions, idbHistory, savedAttempts, idbShareDrafts, savedFlags, savedColors, savedSchedule, savedSuspended, savedBuried, savedHeatmapTheme] = await Promise.all([
           getStorageItem<Category[]>('mcq_genius_categories', INITIAL_CATEGORIES),
           getStorageItem<Question[]>('mcq_genius_questions', INITIAL_QUESTIONS),
           getStorageItem<TestResult[]>('mcq_genius_history', []),
@@ -93,6 +96,7 @@ export default function App() {
           getStorageItem<Record<string, ReviewSchedule> | null>('mcq_genius_review_schedule', null),
           getStorageItem<Record<string, boolean>>('mcq_genius_suspended', {}),
           getStorageItem<Record<string, string>>('mcq_genius_buried_until', {}),
+          getStorageItem<HeatmapTheme>('mcq_genius_heatmap_theme', 'classic'),
         ]);
         // Upgrade old saved tests once. Reconcile any test saved just before an interrupted write.
         const recordedSessions = new Set((savedAttempts || []).map(attempt => attempt.sessionId));
@@ -121,6 +125,7 @@ export default function App() {
           setReviewSchedule(schedules);
           setSuspendedQuestions(savedSuspended || {});
           setBuriedQuestions(savedBuried || {});
+          setHeatmapTheme(heatmapThemes.some(item => item.id === savedHeatmapTheme) ? savedHeatmapTheme : 'classic');
           setStorageReady(true);
         }
       } catch (err) {
@@ -150,6 +155,11 @@ export default function App() {
     if (!storageReady) return;
     void setStorageItem('mcq_genius_attempts', questionAttempts).catch(() => setStorageError('Không lưu được thống kê luyện tập. Kiểm tra dung lượng thiết bị.'));
   }, [questionAttempts, storageReady]);
+
+  useEffect(() => {
+    if (!storageReady) return;
+    void setStorageItem('mcq_genius_heatmap_theme', heatmapTheme).catch(() => setStorageError('Không lưu được giao diện lịch ôn tập.'));
+  }, [heatmapTheme, storageReady]);
 
   useEffect(() => {
     if (!storageReady) return;
@@ -357,6 +367,7 @@ export default function App() {
     mcq_genius_questions: questions,
     mcq_genius_history: testHistory,
     mcq_genius_attempts: questionAttempts,
+    mcq_genius_heatmap_theme: heatmapTheme,
     mcq_genius_share_drafts: shareDrafts,
     mcq_genius_study_flags: studyFlags,
     mcq_genius_study_flag_colors: studyFlagColors,
@@ -372,6 +383,7 @@ export default function App() {
     setQuestions(snapshot.mcq_genius_questions);
     setTestHistory(snapshot.mcq_genius_history);
     setQuestionAttempts(snapshot.mcq_genius_attempts);
+    setHeatmapTheme(heatmapThemes.some(item => item.id === snapshot.mcq_genius_heatmap_theme) ? snapshot.mcq_genius_heatmap_theme! : 'classic');
     setShareDrafts(snapshot.mcq_genius_share_drafts);
     setStudyFlags(snapshot.mcq_genius_study_flags);
     setStudyFlagColors(snapshot.mcq_genius_study_flag_colors);
@@ -883,6 +895,7 @@ export default function App() {
               onAutoCategorizeWithAI={handleAutoCategorizeAI}
               isCategorizingAI={isCategorizingAI}
             />
+            <ReviewHeatmap attempts={questionAttempts} theme={heatmapTheme} onThemeChange={setHeatmapTheme} />
           </>
         )}
 

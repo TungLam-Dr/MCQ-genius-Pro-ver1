@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import type { Category, Question, QuestionAttempt, ReviewSchedule, SharedExamDraft, StudyFlagColor, TestResult } from '../types/quiz';
+import type { HeatmapTheme } from '../utils/reviewHeatmap';
 import { INITIAL_CATEGORIES, INITIAL_QUESTIONS } from '../data/defaultQuestions';
 
 const url = import.meta.env.VITE_SUPABASE_URL as string | undefined;
@@ -15,6 +16,7 @@ export interface CloudSnapshot {
   mcq_genius_questions: Question[];
   mcq_genius_history: TestResult[];
   mcq_genius_attempts: QuestionAttempt[];
+  mcq_genius_heatmap_theme?: HeatmapTheme; // Optional for backups made before the heatmap was added.
   mcq_genius_share_drafts: SharedExamDraft[];
   mcq_genius_study_flags: Record<string, boolean>;
   mcq_genius_study_flag_colors: Record<string, StudyFlagColor>;
