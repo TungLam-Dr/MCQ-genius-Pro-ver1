@@ -7,11 +7,13 @@ import { categorizeQuestionsWithGemini } from './services/gemini';
 import { setStorageItem, getStorageItem, replaceStoredSnapshot } from './utils/storage';
 import type { CloudSnapshot } from './services/cloudSync';
 import { scheduleReview } from './utils/reviewScheduler';
+import { getTodayReview } from './utils/todayReview';
 import { canMoveCategory, isFolder } from './utils/categoryTree';
 import { heatmapThemes, type HeatmapTheme } from './utils/reviewHeatmap';
 import { Navbar } from './components/Navbar';
 import { CategoryManager } from './components/CategoryManager';
 import { ReviewHeatmap } from './components/ReviewHeatmap';
+import { TodayReviewCard } from './components/TodayReviewCard';
 import { TestHistoryView, type ReviewFilter } from './components/TestHistoryView';
 import { GoatCountdownModal } from './components/GoatCountdownModal';
 import { SharedExamDrafts } from './components/SharedExamDrafts';
@@ -60,6 +62,8 @@ export default function App() {
   const [pendingDeleteResult, setPendingDeleteResult] = useState<TestResult | null>(null);
   const [storageReady, setStorageReady] = useState(false);
   const [storageError, setStorageError] = useState('');
+  const [reviewClock, setReviewClock] = useState(() => Date.now());
+  const [dailyReviewIds, setDailyReviewIds] = useState<string[] | null>(null);
 
   // The question bank has its own page; the home page stays compact.
   const [activeTab, setActiveTab] = useState<'home' | 'questions' | 'browser' | 'review' | 'sync' | 'unanswered' | 'history' | 'create-test' | 'runner' | 'result' | 'analyze' | 'share-drafts' | 'share-preview'>('home');
@@ -79,6 +83,23 @@ export default function App() {
   const [viewingSavedResult, setViewingSavedResult] = useState(false);
   const [resultReturnTab, setResultReturnTab] = useState<'history' | 'analyze'>('history');
   const syncChange = useMemo(() => ({}), [categories, questions, testHistory, questionAttempts, shareDrafts, studyFlags, studyFlagColors, reviewSchedule, suspendedQuestions, buriedQuestions, heatmapTheme]);
+
+  useEffect(() => {
+    if (activeTab !== 'home') return;
+    setReviewClock(Date.now());
+    const timer = window.setInterval(() => setReviewClock(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, [activeTab]);
+
+  const todayReview = useMemo(() => getTodayReview(
+    questions, reviewSchedule, suspendedQuestions, buriedQuestions, new Date(reviewClock),
+  ), [questions, reviewSchedule, suspendedQuestions, buriedQuestions, reviewClock]);
+
+  const openReview = (ids: string[] | null = null) => {
+    setDailyReviewIds(ids);
+    setActiveTab('review');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   // Hydrate full data from IndexedDB on initial mount
   useEffect(() => {
@@ -715,6 +736,11 @@ export default function App() {
         />
         {activeTab === 'home' && (
           <>
+            <TodayReviewCard
+              summary={todayReview}
+              onStart={() => openReview(todayReview.questionIds)}
+              onOpenReview={() => openReview()}
+            />
             {/* Main learning actions */}
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
               {/* Card 1: Upload File */}
@@ -769,7 +795,7 @@ export default function App() {
 
               <button
                 type="button"
-                onClick={() => setActiveTab('review')}
+                onClick={() => openReview()}
                 className="group rounded-3xl p-6 bg-gradient-to-br from-amber-900 via-slate-900 to-orange-950 text-left text-white border border-amber-500/30 hover:border-amber-400 shadow-xl transition-all hover:-translate-y-1 relative overflow-hidden"
               >
                 <div className="flex items-center justify-between mb-4">
@@ -954,6 +980,7 @@ export default function App() {
 
         {activeTab === 'review' && (
           <StudyReview
+            initialQueueIds={dailyReviewIds}
             questions={questions}
             categories={categories}
             attempts={questionAttempts}
