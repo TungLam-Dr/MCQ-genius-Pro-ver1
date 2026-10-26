@@ -20,6 +20,7 @@ interface Filters {
 }
 interface SavedFilter { id: string; name: string; filters: Filters }
 interface Props {
+  initialQueueIds?: string[] | null;
   questions: Question[];
   categories: Category[];
   attempts: QuestionAttempt[];
@@ -61,7 +62,7 @@ const panelClass = 'rounded-2xl border border-slate-200 bg-white p-4 shadow-sm d
 const searchable = (value: unknown) => String(value ?? '').toLocaleLowerCase('vi-VN');
 
 export const StudyReview: React.FC<Props> = ({
-  questions, categories, attempts, flags, flagColors, schedules, suspended, buriedUntil,
+  initialQueueIds, questions, categories, attempts, flags, flagColors, schedules, suspended, buriedUntil,
   onFlagColor, onSuspend, onBury, onGrade, onSetTags, onEdit, onBack,
 }) => {
   const [filters, setFilters] = useState<Filters>(initialFilters);
@@ -69,7 +70,7 @@ export const StudyReview: React.FC<Props> = ({
   const [savedReady, setSavedReady] = useState(false);
   const [saveError, setSaveError] = useState('');
   const [limit, setLimit] = useState(20);
-  const [queue, setQueue] = useState<string[] | null>(null);
+  const [queue, setQueue] = useState<string[] | null>(() => initialQueueIds?.length ? [...initialQueueIds] : null);
   const [position, setPosition] = useState(0);
   const [choice, setChoice] = useState<number | null>(null);
   const [revealed, setRevealed] = useState(false);
