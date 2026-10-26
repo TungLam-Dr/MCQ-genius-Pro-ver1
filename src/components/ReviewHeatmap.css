@@ -1,0 +1,61 @@
+.review-heatmap {
+  --heat-size: 15px;
+  --heat-gap: 4px;
+  --heat-0: #e9edf4;
+  --heat-1: #c6e8d0;
+  --heat-2: #86d2a0;
+  --heat-3: #42ae70;
+  --heat-4: #197d4c;
+}
+.dark .review-heatmap { --heat-0: #334155; }
+.review-heatmap[data-theme="fire"] { --heat-1: #fed7aa; --heat-2: #fb923c; --heat-3: #ea580c; --heat-4: #b91c1c; }
+.review-heatmap[data-theme="ice"] { --heat-1: #d5f4ff; --heat-2: #7dd3fc; --heat-3: #38bdf8; --heat-4: #0369a1; }
+.review-heatmap[data-theme="christmas"] { --heat-1: #c9e8c5; --heat-2: #6fbd70; --heat-3: #18803b; --heat-4: #c42b42; }
+.review-heatmap[data-theme="tet"] { --heat-1: #fde68a; --heat-2: #fbbf24; --heat-3: #f97316; --heat-4: #dc2626; }
+.review-heatmap[data-theme="football"] { --heat-1: #c8edbc; --heat-2: #77c96d; --heat-3: #319857; --heat-4: #146438; }
+.review-heatmap[data-theme="badminton"] { --heat-1: #e9dcfc; --heat-2: #c4a3f7; --heat-3: #9567de; --heat-4: #6637aa; }
+.review-heatmap[data-theme="fire"] { --heat-emblem: '✦'; }
+.review-heatmap[data-theme="ice"] { --heat-emblem: '❄'; }
+.review-heatmap[data-theme="christmas"] { --heat-emblem: '✦'; }
+.review-heatmap[data-theme="tet"] { --heat-emblem: '✿'; }
+.review-heatmap[data-theme="football"] { --heat-emblem: '⚽'; }
+.review-heatmap[data-theme="badminton"] { --heat-emblem: '🏸'; }
+.heatmap-table {
+  width: max-content;
+  display: grid;
+  grid-template-columns: 25px auto;
+  column-gap: 8px;
+  row-gap: 7px;
+}
+.heatmap-months {
+  grid-column: 2;
+  display: grid;
+  grid-template-columns: repeat(var(--weeks), var(--heat-size));
+  gap: var(--heat-gap);
+  color: #64748b;
+  font-size: 10px;
+  line-height: 1.2;
+}
+.heatmap-months span { white-space: nowrap; }
+.heatmap-weekdays { grid-column: 1; display: grid; grid-template-rows: repeat(7, var(--heat-size)); gap: var(--heat-gap); color: #64748b; font-size: 10px; align-items: center; }
+.heatmap-cells { grid-column: 2; display: grid; grid-auto-flow: column; grid-template-rows: repeat(7, var(--heat-size)); grid-template-columns: repeat(var(--weeks), var(--heat-size)); gap: var(--heat-gap); }
+.heat-cell { position: relative; display: inline-block; width: var(--heat-size); height: var(--heat-size); flex: none; border: 0; border-radius: 4px; background: var(--heat-0); cursor: pointer; transition: transform .15s ease, box-shadow .15s ease; }
+.heat-cell[data-level="1"] { background: var(--heat-1); }
+.heat-cell[data-level="2"] { background: var(--heat-2); }
+.heat-cell[data-level="3"] { background: var(--heat-3); }
+.heat-cell[data-level="4"] { background: var(--heat-4); }
+.heatmap-cells .heat-cell:hover { transform: scale(1.35); z-index: 1; }
+.heatmap-cells .heat-cell[aria-pressed="true"] { outline: 2px solid #4f46e5; outline-offset: 2px; z-index: 1; }
+.heatmap-cells .heat-cell:focus-visible { outline: 3px solid #4f46e5; outline-offset: 2px; z-index: 2; }
+.review-heatmap:not([data-theme="classic"]) .heatmap-cells .heat-cell[data-level="4"]::after { content: var(--heat-emblem); position: absolute; inset: 0; display: grid; place-items: center; font-size: 10px; color: #fff; line-height: 1; }
+.review-heatmap[data-theme="fire"] .heatmap-cells .heat-cell[data-level="4"] { animation: heat-glow 2.2s ease-in-out infinite; }
+.review-heatmap[data-theme="ice"] .heatmap-cells .heat-cell[data-level="4"] { animation: ice-glow 2.8s ease-in-out infinite; }
+.review-heatmap[data-theme="christmas"] .heatmap-cells .heat-cell[data-level="4"],
+.review-heatmap[data-theme="tet"] .heatmap-cells .heat-cell[data-level="4"],
+.review-heatmap[data-theme="football"] .heatmap-cells .heat-cell[data-level="4"],
+.review-heatmap[data-theme="badminton"] .heatmap-cells .heat-cell[data-level="4"] { animation: festive-glow 3s ease-in-out infinite; }
+@keyframes heat-glow { 50% { box-shadow: 0 0 9px 3px #f9731680; } }
+@keyframes ice-glow { 50% { box-shadow: 0 0 9px 3px #38bdf880; } }
+@keyframes festive-glow { 50% { box-shadow: 0 0 7px 2px var(--heat-4); } }
+@media (max-width: 640px) { .review-heatmap { --heat-size: 21px; --heat-gap: 5px; } }
+@media (prefers-reduced-motion: reduce) { .review-heatmap .heat-cell { animation: none !important; transition: none; } }
