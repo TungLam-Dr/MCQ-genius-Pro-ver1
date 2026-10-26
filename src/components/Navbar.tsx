@@ -1,5 +1,10 @@
-import React from 'react';
-import { Sparkles, Calendar } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Sparkles, Download } from 'lucide-react';
+
+interface InstallPromptEvent extends Event {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>;
+}
 
 interface NavbarProps {
   onOpenGoatCountdown: () => void;
@@ -10,6 +15,30 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenGoatCountdown,
   onGoToHome,
 }) => {
+  const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
+
+  useEffect(() => {
+    if (window.matchMedia('(display-mode: standalone)').matches) return;
+    const ready = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event as InstallPromptEvent);
+    };
+    const installed = () => setInstallPrompt(null);
+    window.addEventListener('beforeinstallprompt', ready);
+    window.addEventListener('appinstalled', installed);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', ready);
+      window.removeEventListener('appinstalled', installed);
+    };
+  }, []);
+
+  const install = async () => {
+    if (!installPrompt) return;
+    setInstallPrompt(null);
+    await installPrompt.prompt();
+    await installPrompt.userChoice;
+  };
+
   return (
     <header className="sticky top-0 z-30 bg-gradient-to-r from-red-950 via-slate-950 to-emerald-950 text-white border-b-2 border-amber-500/40 shadow-2xl relative overflow-hidden backdrop-blur">
       {/* Animated Snowflakes in Navbar */}
@@ -52,6 +81,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {/* Far Right: Goat Icon Button (Con Dê 🐐) for August 1, 2027 Exam Countdown */}
           <div className="flex items-center space-x-3">
+            {installPrompt && <button type="button" onClick={() => void install()} className="inline-flex min-h-11 items-center gap-1.5 rounded-xl border border-amber-300/50 bg-slate-800 px-3 text-xs font-bold text-amber-100 hover:bg-slate-700" title="Cài MCQ Genius lên thiết bị"><Download className="h-4 w-4" /><span className="hidden sm:inline">Cài app</span></button>}
             <button
               onClick={onOpenGoatCountdown}
               className="group relative flex items-center space-x-2 px-3.5 py-1.5 bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-600 hover:from-amber-400 hover:to-yellow-300 text-slate-950 text-xs font-black rounded-2xl shadow-xl shadow-amber-500/25 transition-all transform hover:scale-105 active:scale-95 border border-amber-300/80"
