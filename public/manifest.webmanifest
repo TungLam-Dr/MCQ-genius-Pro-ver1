@@ -1,0 +1,16 @@
+{
+  "id": "/",
+  "name": "MCQ Genius AI",
+  "short_name": "MCQ Genius",
+  "description": "Ngân hàng câu hỏi, tạo bài kiểm tra và ôn tập y khoa.",
+  "lang": "vi",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b1930",
+  "theme_color": "#0b1930",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
