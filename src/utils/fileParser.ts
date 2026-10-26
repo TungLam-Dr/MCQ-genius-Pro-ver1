@@ -233,7 +233,8 @@ export function parseTextToStructuredQuestions(rawText: string): Partial<Questio
 
     // First use line-start labels. A second pass supports compact files with
     // "A. ... B. ..." on one line without mistaking prose for options.
-    const lineOption = /^[ \t]*([A-J])[.):/-][ \t]+/gim;
+    // Word can put the whole answer in an image directly after a bare "A.".
+    const lineOption = /^[ \t]*([A-J])[.):/-](?:[ \t]+|(?=\r?$))/gim;
     let optionMarkers = [...block.matchAll(lineOption)];
     if (optionMarkers.length < 2) {
       optionMarkers = [...block.matchAll(/(?<!\S)([A-J])[.):/-][ \t]+/gim)];
@@ -382,6 +383,38 @@ export function applyAnswerKeysToQuestions(
   return { updatedQuestions, matchedCount, verifiedCount, reviewMatches, unresolved };
 }
 
+/** Keep Word image positions: stem figures and each choice have separate owners. */
+export function attachDocxImagesToQuestions(questions: Partial<Question>[], images: string[]): void {
+  const marker = /\[\[MCQ_IMAGE_(\d+)\]\]/g;
+  const takeImages = (value: string): string[] => [...value.matchAll(marker)]
+    .map(match => images[Number(match[1])]).filter((src): src is string => !!src);
+  for (const question of questions) {
+    const stem = question.question || '';
+    question.images = takeImages(stem);
+    question.imageUrl = question.images[0];
+    question.question = stem.replace(marker, '').replace(/\s+/g, ' ').trim();
+    question.optionImages = (question.options || []).map(option => takeImages(option));
+    question.options = (question.options || []).map((option, index) => {
+      const cleaned = option.replace(marker, '').replace(/\s+/g, ' ').trim();
+      return cleaned || (question.optionImages?.[index]?.length ? 'Hình ảnh' : '');
+    });
+  }
+}
+
+export function parseDocxQuestionHtml(html: string, detectedImages: string[]): {rawText: string; questions: Partial<Question>[]} {
+  let imageIndex = 0;
+  const rawText = html
+    .replace(/<img\b[^>]*>/gi, () => `\n[[MCQ_IMAGE_${imageIndex++}]]\n`)
+    .replace(/<br\s*\/?\s*>/gi, '\n')
+    .replace(/<\/(?:p|div|li|tr|h[1-6])>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+  const questions = parseTextToStructuredQuestions(rawText);
+  attachDocxImagesToQuestions(questions, detectedImages);
+  return {rawText,questions};
+}
+
 export async function parseUploadedFile(file: File | { name: string; buffer: ArrayBuffer }): Promise<ParsedFileResult> {
   const fileName = file.name;
   const ext = fileName.split('.').pop()?.toLowerCase();
@@ -421,32 +454,18 @@ export async function parseUploadedFile(file: File | { name: string; buffer: Arr
       { arrayBuffer },
       {
         convertImage: mammoth.images.imgElement((image) => {
+          const index = detectedImages.length;
+          detectedImages.push(''); // Reserve position before asynchronous image reads finish.
           return image.read('base64').then((imageBuffer) => {
             const src = `data:${image.contentType};base64,${imageBuffer}`;
-            detectedImages.push(src);
+            detectedImages[index] = src;
             return { src };
           });
         }),
       }
     );
 
-    let imageIndex = 0;
-    const rawText = result.value
-      .replace(/<img\b[^>]*>/gi, () => `\n[[MCQ_IMAGE_${imageIndex++}]]\n`)
-      .replace(/<br\s*\/?\s*>/gi, '\n')
-      .replace(/<\/(?:p|div|li|tr|h[1-6])>/gi, '\n')
-      .replace(/<[^>]*>/g, '')
-      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-    const parsedQuestions = parseTextToStructuredQuestions(rawText);
-    for (const q of parsedQuestions) {
-      const combined = [q.question || '', ...(q.options || [])].join(' ');
-      const indices = [...combined.matchAll(/\[\[MCQ_IMAGE_(\d+)\]\]/g)].map(m => Number(m[1]));
-      q.images = indices.map(i => detectedImages[i]).filter(Boolean);
-      q.imageUrl = q.images[0];
-      q.question = q.question?.replace(/\[\[MCQ_IMAGE_\d+\]\]/g, '').trim();
-      q.options = q.options?.map(o => o.replace(/\[\[MCQ_IMAGE_\d+\]\]/g, '').trim());
-    }
+    const { rawText, questions: parsedQuestions } = parseDocxQuestionHtml(result.value, detectedImages);
 
     return {
       fileName,

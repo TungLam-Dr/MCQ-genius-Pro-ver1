@@ -77,14 +77,14 @@ export function selectQuestionsForBlock(
   return selected.map((q) => {
     if (!config.shuffleOptions || q.options.length <= 1) return { ...q };
 
-    const originalCorrectOption = q.options[q.correctAnswer];
-    const indexedOptions = q.options.map((opt, idx) => ({ opt, isCorrect: idx === q.correctAnswer }));
+    const indexedOptions = q.options.map((opt, idx) => ({ opt, images: q.optionImages?.[idx] || [], isCorrect: idx === q.correctAnswer }));
     const shuffledIndexed = shuffleArray(indexedOptions);
     const newCorrectIndex = shuffledIndexed.findIndex((item) => item.isCorrect);
 
     return {
       ...q,
       options: shuffledIndexed.map((item) => item.opt),
+      optionImages: shuffledIndexed.map((item) => item.images),
       correctAnswer: newCorrectIndex,
     };
   });

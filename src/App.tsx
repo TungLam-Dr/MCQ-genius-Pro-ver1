@@ -419,6 +419,7 @@ export default function App() {
       explanationPages: item.explanationPages,
       imageUrl: item.imageUrl,
       images: item.images,
+      optionImages: item.optionImages,
       sourceId: item.sourceId,
       sourceBlock: item.sourceBlock,
       sourceNumber: item.sourceNumber,

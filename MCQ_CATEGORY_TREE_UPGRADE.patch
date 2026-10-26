@@ -1,0 +1,656 @@
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -7,6 +7,7 @@
+ import { setStorageItem, getStorageItem, replaceStoredSnapshot } from './utils/storage';
+ import type { CloudSnapshot } from './services/cloudSync';
+ import { scheduleReview } from './utils/reviewScheduler';
++import { canMoveCategory, isFolder } from './utils/categoryTree';
+ import { Navbar } from './components/Navbar';
+ import { CategoryManager } from './components/CategoryManager';
+ import { TestHistoryView, type ReviewFilter } from './components/TestHistoryView';
+@@ -214,11 +215,12 @@
+   };
+ 
+   // Handlers for Category & Questions
+-  const handleAddCategory = (name: string, description: string) => {
++  const handleAddCategory = (name: string, description: string, parentId: string | null = null) => {
+     const newCat: Category = {
+       id: `cat-${Date.now()}`,
+       name,
+       description,
++      parentId: parentId && categories.some(category => category.id === parentId && isFolder(category)) ? parentId : null,
+       icon: 'FolderTree',
+       color: 'from-purple-500 to-indigo-600',
+       questionCount: 0,
+@@ -227,7 +229,42 @@
+     setCategories((prev) => [...prev, newCat]);
+   };
+ 
++  const handleCreateFolder = (name: string, description: string, parentId: string | null) => {
++    if (!name.trim()) return;
++    setCategories(previous => {
++      if (parentId && !previous.some(category => category.id === parentId && isFolder(category))) return previous;
++      return [...previous, {
++        id: `folder-${crypto.randomUUID()}`, name: name.trim(), description: description.trim(),
++        kind: 'folder', parentId, icon: 'FolderTree', color: 'from-amber-500 to-orange-600',
++        questionCount: 0, createdAt: new Date().toISOString(),
++      }];
++    });
++  };
++
++  const handleUpdateCategory = (id: string, name: string, description: string, parentId: string | null) => {
++    if (!name.trim()) return;
++    const category = categories.find(item => item.id === id);
++    if (!category || !canMoveCategory(categories, id, parentId)) return;
++    const nextName = name.trim();
++    setCategories(previous => previous.map(item => item.id === id
++      ? { ...item, name: nextName, description: description.trim(), parentId }
++      : item));
++    if (!isFolder(category) && nextName !== category.name) {
++      setQuestions(previous => previous.map(question => question.categoryId === id
++        ? { ...question, categoryName: nextName } : question));
++    }
++  };
++
++  const handleDeleteFolder = (id: string) => {
++    setCategories(previous => {
++      const folder = previous.find(category => category.id === id);
++      if (!folder || !isFolder(folder) || previous.some(category => category.parentId === id) || questions.some(question => question.categoryId === id)) return previous;
++      return previous.filter(category => category.id !== id);
++    });
++  };
++
+   const handleDeleteCategory = (categoryId: string) => {
++    if (categories.some(category => category.id === categoryId && isFolder(category)) || categories.some(category => category.parentId === categoryId)) return;
+     const deletedIds = new Set(questions.filter((question) => question.categoryId === categoryId).map((question) => question.id));
+     const withoutDeleted = <T,>(previous: Record<string, T>) => {
+       const next = { ...previous }; deletedIds.forEach(id => delete next[id]); return next;
+@@ -437,7 +474,8 @@
+           });
+         });
+ 
+-        setCategories(newCatList);
++        // Keep existing folders and old imported categories; AI classification must not erase the library tree.
++        setCategories(previous => [...previous, ...newCatList]);
+         setQuestions(updatedQuestions);
+       }
+     } catch (err: any) {
+@@ -825,6 +863,9 @@
+             {/* Category Manager Section */}
+             <CategoryManager
+               view="categories"
++              onCreateFolder={handleCreateFolder}
++              onUpdateCategory={handleUpdateCategory}
++              onDeleteFolder={handleDeleteFolder}
+               categories={categories}
+               questions={questions}
+               onOpenQuestionList={openQuestionList}
+@@ -850,13 +891,16 @@
+               <div>
+                 <button type="button" onClick={() => setActiveTab('home')} className="mb-2 inline-flex items-center gap-1.5 text-sm font-semibold text-indigo-700 hover:underline dark:text-indigo-300"><ArrowLeft className="h-4 w-4" /> Trang chủ</button>
+                 <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Ngân hàng câu hỏi</h1>
+-                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Tìm, lọc và quản lý {questions.length} câu hỏi trong {categories.length} mục.</p>
++                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Tìm, lọc và quản lý {questions.length} câu hỏi trong {categories.filter(category => !isFolder(category)).length} mục đề thi và {categories.filter(isFolder).length} thư mục.</p>
+               </div>
+               <button type="button" onClick={() => setActiveTab('browser')} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-indigo-600 px-4 text-sm font-bold text-white"><PanelLeft size={17} /> Mở Browser</button>
+             </div>
+             <CategoryManager
+               key={questionListCategoryId}
+               view="questions"
++              onCreateFolder={handleCreateFolder}
++              onUpdateCategory={handleUpdateCategory}
++              onDeleteFolder={handleDeleteFolder}
+               initialCategoryId={questionListCategoryId}
+               categories={categories}
+               questions={questions}
+@@ -925,6 +969,9 @@
+               view="questions"
+               initialCategoryId="all"
+               unansweredOnly
++              onCreateFolder={handleCreateFolder}
++              onUpdateCategory={handleUpdateCategory}
++              onDeleteFolder={handleDeleteFolder}
+               categories={categories}
+               questions={questions}
+               onAddCategory={handleAddCategory}
+--- a/src/components/CategoryManager.tsx
++++ b/src/components/CategoryManager.tsx
+@@ -1,5 +1,7 @@
+ import React, { useMemo, useState } from 'react';
+ import { Category, Question, QuestionAttempt } from '../types/quiz';
++import { CategoryTree } from './CategoryTree';
++import { categoryPath, isFolder, subtreeIds } from '../utils/categoryTree';
+ import {
+   FolderPlus,
+   Search,
+@@ -31,7 +33,10 @@
+   questionAttempts?: QuestionAttempt[];
+   studyFlags?: Record<string, boolean>;
+   onToggleStudyFlag?: (questionId: string) => void;
+-  onAddCategory: (categoryName: string, description: string) => void;
++  onAddCategory: (categoryName: string, description: string, parentId?: string | null) => void;
++  onCreateFolder: (name: string, description: string, parentId: string | null) => void;
++  onUpdateCategory: (id: string, name: string, description: string, parentId: string | null) => void;
++  onDeleteFolder: (id: string) => void;
+   onDeleteCategory: (categoryId: string) => void;
+   onDeleteQuestion: (questionId: string) => void;
+   onAddQuestion: (question: Partial<Question>) => void;
+@@ -67,6 +72,9 @@
+   studyFlags = {},
+   onToggleStudyFlag,
+   onAddCategory,
++  onCreateFolder,
++  onUpdateCategory,
++  onDeleteFolder,
+   onDeleteCategory,
+   onDeleteQuestion,
+   onAddQuestion,
+@@ -89,6 +97,7 @@
+   const [showAddCatModal, setShowAddCatModal] = useState(false);
+   const [newCatName, setNewCatName] = useState('');
+   const [newCatDesc, setNewCatDesc] = useState('');
++  const [newCatParentId, setNewCatParentId] = useState<string | null>(null);
+ 
+   // Confirmation modal state for fast category deletion
+   const [catToDelete, setCatToDelete] = useState<Category | null>(null);
+@@ -99,7 +108,7 @@
+   const [newQOptions, setNewQOptions] = useState(['', '', '', '']);
+   const [newQCorrect, setNewQCorrect] = useState(0);
+   const [newQExpl, setNewQExpl] = useState('');
+-  const [newQCatId, setNewQCatId] = useState(categories[0]?.id || '');
++  const [newQCatId, setNewQCatId] = useState(categories.find(category => !isFolder(category))?.id || '');
+   const [newQImageUrl, setNewQImageUrl] = useState('');
+   const [previewZoomImage, setPreviewZoomImage] = useState<string | null>(null);
+   const [editingQuestion, setEditingQuestion] = useState<Question | null>(null);
+@@ -119,8 +128,11 @@
+     return stats;
+   }, [questionAttempts]);
+ 
++  const leafCategories = useMemo(() => categories.filter(category => !isFolder(category)), [categories]);
++  const selectedIds = useMemo(() => selectedCategoryId === 'all' ? null : subtreeIds(categories, selectedCategoryId), [categories, selectedCategoryId]);
++
+   const bankCounts = useMemo(() => {
+-    const scoped = selectedCategoryId === 'all' ? questions : questions.filter((question) => question.categoryId === selectedCategoryId);
++    const scoped = selectedIds ? questions.filter(question => selectedIds.has(question.categoryId)) : questions;
+     return {
+       all: scoped.length,
+       unanswered: scoped.filter(needsAnswer).length,
+@@ -129,12 +141,12 @@
+       mistaken: scoped.filter((question) => (practiceStats.get(question.id)?.incorrect || 0) > 0).length,
+       flagged: scoped.filter((question) => !!studyFlags[question.id]).length,
+     };
+-  }, [questions, practiceStats, selectedCategoryId, studyFlags]);
++  }, [questions, practiceStats, selectedIds, studyFlags]);
+ 
+   // Search and practice filters share the same question bank.
+   const normalizedSearch = searchQuery.trim().toLowerCase();
+   const filteredQuestions = questions.filter((q) => {
+-    const matchCat = selectedCategoryId === 'all' || q.categoryId === selectedCategoryId;
++    const matchCat = !selectedIds || selectedIds.has(q.categoryId);
+     const matchSearch =
+       q.question.toLowerCase().includes(normalizedSearch) ||
+       q.options.some((opt) => opt.toLowerCase().includes(normalizedSearch)) ||
+@@ -182,9 +194,10 @@
+   const handleCreateCategory = (e: React.FormEvent) => {
+     e.preventDefault();
+     if (!newCatName.trim()) return;
+-    onAddCategory(newCatName.trim(), newCatDesc.trim());
++    onAddCategory(newCatName.trim(), newCatDesc.trim(), newCatParentId);
+     setNewCatName('');
+     setNewCatDesc('');
++    setNewCatParentId(null);
+     setShowAddCatModal(false);
+   };
+ 
+@@ -201,7 +214,8 @@
+     e.preventDefault();
+     if (!newQText.trim() || newQOptions.some((o) => !o.trim())) return;
+ 
+-    const targetCat = categories.find((c) => c.id === newQCatId) || categories[0];
++    const targetCat = leafCategories.find((c) => c.id === newQCatId) || leafCategories[0];
++    if (!targetCat) return;
+ 
+     onAddQuestion({
+       question: newQText.trim(),
+@@ -226,13 +240,14 @@
+ 
+   return (
+     <div className="space-y-8">
++      {view === 'questions' && !unansweredOnly && <CategoryTree categories={categories} questions={questions} selectedId={selectedCategoryId} onSelect={id => { setSelectedCategoryId(id); setPage(1); }} onCreateFolder={onCreateFolder} onUpdateCategory={onUpdateCategory} onDeleteFolder={onDeleteFolder} onCreateQuestionCategory={() => setShowAddCatModal(true)} />}
+       {/* Category Cards Grid: visible when view !== 'questions' */}
+       {view !== 'questions' && (
+         <div>
+           <div className="flex items-center justify-between mb-4">
+             <h2 className="text-lg font-bold text-slate-800 dark:text-slate-100 flex items-center space-x-2">
+               <FolderTree className="w-5 h-5 text-indigo-500" />
+-              <span>Danh Sách Các Mục Đã Lưu ({categories.length})</span>
++              <span>Danh Sách Các Mục Đã Lưu ({leafCategories.length})</span>
+             </h2>
+ 
+             <button
+@@ -283,7 +298,7 @@
+             </div>
+ 
+             {/* Individual Category Cards with PROMINENT Delete Icon Button */}
+-            {categories.map((cat) => {
++            {leafCategories.map((cat) => {
+               const IconComponent = (cat.icon && ICON_MAP[cat.icon]) || FolderTree;
+               const catQuestionsCount = questions.filter((q) => q.categoryId === cat.id).length;
+               const isSelected = selectedCategoryId === cat.id;
+@@ -380,7 +395,7 @@
+               <span>Tất Cả</span>
+               <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-black/10 dark:bg-white/10">{visibleQuestionCount}</span>
+             </button>
+-            {categories.map((cat) => {
++            {leafCategories.map((cat) => {
+               const count = questions.filter((q) => q.categoryId === cat.id && (!unansweredOnly || needsAnswer(q))).length;
+               const isSel = selectedCategoryId === cat.id;
+               return (
+@@ -436,15 +451,15 @@
+                     Mục: {currentSelectedCategoryObj.name}
+                   </span>
+ 
+-                  {/* DIRECT DELETE CATEGORY BUTTON IN QUESTION HEADER */}
+-                  <button
++                  {/* A folder is edited in the tree and can only be deleted when empty. */}
++                  {!isFolder(currentSelectedCategoryObj) && <button
+                     onClick={() => setCatToDelete(currentSelectedCategoryObj)}
+                     className="px-2.5 py-1 bg-red-500/10 hover:bg-red-600 text-red-600 hover:text-white border border-red-500/30 rounded-lg text-xs font-bold transition-all flex items-center space-x-1"
+                     title="Xóa nhanh toàn bộ mục này"
+                   >
+                     <Trash2 className="w-3.5 h-3.5" />
+                     <span>Xóa Mục Này</span>
+-                  </button>
++                  </button>}
+                 </div>
+               )}
+             </div>
+@@ -749,6 +764,10 @@
+                 />
+               </div>
+ 
++              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">Nằm trong thư mục
++                <select value={newCatParentId || ''} onChange={event => setNewCatParentId(event.target.value || null)} className="mt-1 min-h-11 w-full rounded-xl border bg-white px-3 dark:bg-slate-900"><option value="">Ngoài cùng</option>{categories.filter(isFolder).map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select>
++              </label>
++
+               <div className="flex justify-end space-x-2 pt-2">
+                 <button
+                   type="button"
+@@ -782,12 +801,13 @@
+                   onChange={(e) => setNewQCatId(e.target.value)}
+                   className="w-full px-3 py-2 text-xs bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-xl text-slate-900 dark:text-slate-100"
+                 >
+-                  {categories.map((c) => (
++                  {leafCategories.map((c) => (
+                     <option key={c.id} value={c.id}>
+-                      {c.name}
++                      {categoryPath(categories, c.id)}
+                     </option>
+                   ))}
+                 </select>
++                {!leafCategories.length && <p className="mt-2 text-xs text-amber-600">Hãy tạo một mục chứa câu hỏi trước khi thêm câu thủ công.</p>}
+               </div>
+ 
+               <div>
+--- a/src/components/FileUploadModal.tsx
++++ b/src/components/FileUploadModal.tsx
+@@ -1,5 +1,6 @@
+ import React, { useState } from 'react';
+ import { Category, Question } from '../types/quiz';
++import { categoryPath, isFolder } from '../utils/categoryTree';
+ import { parseUploadedFile, extractAnswerKeyDocument, applyAnswerKeysToQuestions, KeyMatchIssue, AnswerKeyDocument } from '../utils/fileParser';
+ import { parseFileWithGemini } from '../services/gemini';
+ import {
+@@ -66,7 +67,7 @@
+   const [manualAnswers, setManualAnswers] = useState<Record<number, number>>({});
+ 
+   // Category Target states
+-  const [selectedTargetCatId, setSelectedTargetCatId] = useState<string>(categories[0]?.id || 'new');
++  const [selectedTargetCatId, setSelectedTargetCatId] = useState<string>(categories.find(category => !isFolder(category))?.id || 'new');
+   const [customNewCatName, setCustomNewCatName] = useState('');
+ 
+   if (!isOpen) return null;
+@@ -517,9 +518,9 @@
+                   className="px-3 py-1.5 text-xs bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-xl text-slate-900 dark:text-slate-100"
+                 >
+                   <option value="new">+ Tạo Mục mới ({customNewCatName || 'Theo tên file'})</option>
+-                  {categories.map((c) => (
++                  {categories.filter(category => !isFolder(category)).map((c) => (
+                     <option key={c.id} value={c.id}>
+-                      {c.name} ({c.questionCount} câu)
++                      {categoryPath(categories, c.id)} ({c.questionCount} câu)
+                     </option>
+                   ))}
+                 </select>
+--- a/src/components/QuestionBrowser.tsx
++++ b/src/components/QuestionBrowser.tsx
+@@ -2,6 +2,7 @@
+ import { AlertTriangle, ArrowLeft, Bookmark, BookOpen, Check, ChevronLeft, ChevronRight, Flag, Image as ImageIcon, Pencil, Search, X } from 'lucide-react';
+ import { Category, Question, QuestionAttempt } from '../types/quiz';
+ import { isQuestionValid } from '../utils/quizEngine';
++import { categoryPath, isFolder, subtreeIds } from '../utils/categoryTree';
+ import { AnswerExplanation } from './AnswerExplanation';
+ 
+ type Status = 'all' | 'flagged' | 'review' | 'mistaken' | 'unattempted' | 'attempted' | 'today' | 'unanswered' | 'images';
+@@ -82,10 +83,11 @@
+ 
+   const tags = useMemo(() => Array.from(new Set(questions.flatMap((q) => q.tags || []))).sort(), [questions]);
+   const blocks = useMemo(() => Array.from(new Set(questions.map((q) => q.sourceBlock).filter((value): value is number => typeof value === 'number'))).sort((a, b) => a - b), [questions]);
++  const categoryIds = useMemo(() => categoryId === 'all' ? null : subtreeIds(categories, categoryId), [categories, categoryId]);
+   const scoped = useMemo(() => questions.filter((q) =>
+-    (categoryId === 'all' || q.categoryId === categoryId) &&
++    (!categoryIds || categoryIds.has(q.categoryId)) &&
+     (sourceBlock === 'all' || q.sourceBlock === Number(sourceBlock))
+-  ), [questions, categoryId, sourceBlock]);
++  ), [questions, categoryIds, sourceBlock]);
+   const counts = useMemo(() => ({
+     all: scoped.length,
+     flagged: scoped.filter((q) => flags[q.id]).length,
+@@ -186,7 +188,7 @@
+             <h2 className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500">Mục học</h2>
+             <select aria-label="Lọc theo mục" value={categoryId} onChange={(e) => { setCategoryId(e.target.value); setPage(1); setSelectedId(null); setSelectedIds(new Set()); resetPreview(); }} className="min-h-11 w-full rounded-xl border border-slate-300 bg-white px-2 text-sm dark:border-slate-600 dark:bg-slate-900">
+               <option value="all">Tất cả mục ({questions.length})</option>
+-              {categories.map((cat) => <option key={cat.id} value={cat.id}>{cat.name} ({questions.filter((q) => q.categoryId === cat.id).length})</option>)}
++              {categories.map((cat) => <option key={cat.id} value={cat.id}>{isFolder(cat) ? '📁 ' : ''}{categoryPath(categories, cat.id)} ({questions.filter((q) => subtreeIds(categories, cat.id).has(q.categoryId)).length})</option>)}
+             </select>
+           </div>
+           {blocks.length > 0 && <div>
+--- a/src/components/StudyReview.tsx
++++ b/src/components/StudyReview.tsx
+@@ -3,6 +3,7 @@
+ import type { Category, Question, QuestionAttempt, ReviewGrade, ReviewSchedule, StudyFlagColor } from '../types/quiz';
+ import { isQuestionValid } from '../utils/quizEngine';
+ import { isReviewDue, isReviewOverdue, tomorrowStart } from '../utils/reviewScheduler';
++import { categoryPath, isFolder, subtreeIds } from '../utils/categoryTree';
+ import { getStorageItem, setStorageItem } from '../utils/storage';
+ import { AnswerExplanation } from './AnswerExplanation';
+ 
+@@ -111,7 +112,8 @@
+   }, [attempts, clock]);
+   const blocks = useMemo(() => [...new Set(questions.map(q => q.sourceBlock).filter((v): v is number => typeof v === 'number'))].sort((a, b) => a - b), [questions]);
+   const inBlock = useMemo(() => questions.filter(q => filters.block === 'all' || (filters.block === 'unassigned' ? q.sourceBlock == null : q.sourceBlock === Number(filters.block))), [questions, filters.block]);
+-  const availableCategories = useMemo(() => categories.filter(c => inBlock.some(q => q.categoryId === c.id)), [categories, inBlock]);
++  const availableCategories = useMemo(() => categories.filter(c => inBlock.some(q => subtreeIds(categories, c.id).has(q.categoryId))), [categories, inBlock]);
++  const selectedCategoryIds = useMemo(() => filters.categoryIds.length ? new Set(filters.categoryIds.flatMap(id => [...subtreeIds(categories, id)])) : null, [categories, filters.categoryIds]);
+   const tags = useMemo(() => [...new Set(inBlock.flatMap(q => q.tags || []))].sort(), [inBlock]);
+   const activeBury = (id: string) => !!buriedUntil[id] && Date.parse(buriedUntil[id]) > clock;
+   const matchesStatus = (q: Question) => {
+@@ -131,7 +133,7 @@
+     }
+   };
+   const visible = useMemo(() => inBlock.filter(q => {
+-    if (filters.categoryIds.length && !filters.categoryIds.includes(q.categoryId)) return false;
++    if (selectedCategoryIds && !selectedCategoryIds.has(q.categoryId)) return false;
+     if (filters.tag !== 'all' && !(q.tags || []).includes(filters.tag)) return false;
+     if (filters.color !== 'all' && (!flags[q.id] || (flagColors[q.id] || 'red') !== filters.color)) return false;
+     if (!matchesStatus(q)) return false;
+@@ -140,7 +142,7 @@
+       .some(part => searchable(part).includes(search));
+   }), [inBlock, filters, stats, flags, flagColors, schedules, suspended, buriedUntil, clock]);
+   const studyable = visible.filter(q => isQuestionValid(q) && !suspended[q.id] && !activeBury(q.id));
+-  const scoped = inBlock.filter(q => !filters.categoryIds.length || filters.categoryIds.includes(q.categoryId));
++  const scoped = inBlock.filter(q => !selectedCategoryIds || selectedCategoryIds.has(q.categoryId));
+   const dueCount = scoped.filter(q => isQuestionValid(q) && !suspended[q.id] && !activeBury(q.id) && isReviewDue(schedules[q.id], clock)).length;
+   const newCount = scoped.filter(q => isQuestionValid(q) && !suspended[q.id] && !activeBury(q.id) && !schedules[q.id] && !(stats.get(q.id)?.total || 0)).length;
+   const currentId = queue?.[position];
+@@ -218,7 +220,7 @@
+           <label className="text-sm font-semibold">Nhãn<select className={`${inputClass} mt-1`} value={filters.tag} onChange={event => updateFilter({ tag: event.target.value })}><option value="all">Mọi nhãn</option>{tags.map(tag => <option key={tag} value={tag}>{tag}</option>)}</select></label>
+           <label className="text-sm font-semibold">Màu cờ<select className={`${inputClass} mt-1`} value={filters.color} onChange={event => updateFilter({ color: event.target.value as Filters['color'] })}><option value="all">Mọi màu</option>{colors.map(color => <option key={color.id} value={color.id}>{color.label}</option>)}</select></label>
+         </div>
+-        <fieldset><legend className="text-sm font-bold">Chọn mục trong Block (để trống là tất cả)</legend><div className="mt-2 flex max-h-40 flex-wrap gap-2 overflow-y-auto">{availableCategories.map(category => <label key={category.id} className="flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border px-3 text-xs"><input type="checkbox" checked={filters.categoryIds.includes(category.id)} onChange={event => updateFilter({ categoryIds: event.target.checked ? [...filters.categoryIds, category.id] : filters.categoryIds.filter(id => id !== category.id) })} />{category.name} ({inBlock.filter(q => q.categoryId === category.id).length})</label>)}{!availableCategories.length && <p className="text-xs text-slate-500">Block này chưa có câu hỏi trong mục nào.</p>}</div></fieldset>
++        <fieldset><legend className="text-sm font-bold">Chọn mục trong Block (để trống là tất cả)</legend><div className="mt-2 flex max-h-40 flex-wrap gap-2 overflow-y-auto">{availableCategories.map(category => <label key={category.id} className="flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border px-3 text-xs"><input type="checkbox" checked={filters.categoryIds.includes(category.id)} onChange={event => updateFilter({ categoryIds: event.target.checked ? [...filters.categoryIds, category.id] : filters.categoryIds.filter(id => id !== category.id) })} />{isFolder(category) ? '📁 ' : ''}{categoryPath(categories, category.id)} ({inBlock.filter(q => subtreeIds(categories, category.id).has(q.categoryId)).length})</label>)}{!availableCategories.length && <p className="text-xs text-slate-500">Block này chưa có câu hỏi trong mục nào.</p>}</div></fieldset>
+         <label className="relative block"><Search size={18} className="absolute left-3 top-3.5 text-slate-400" /><input className={`${inputClass} pl-10`} value={filters.search} onChange={event => updateFilter({ search: event.target.value })} placeholder="Tìm nội dung, mã câu, đáp án..." aria-label="Tìm câu hỏi" /></label>
+         <div className="flex flex-wrap gap-2"><button type="button" onClick={() => start(studyable.slice(0, limit).map(q => q.id))} disabled={!studyable.length} className="min-h-11 rounded-xl bg-amber-600 px-4 text-sm font-bold text-white disabled:opacity-40">Ôn {Math.min(studyable.length, limit)} câu theo bộ lọc</button><button type="button" onClick={() => start(scoped.filter(q => isQuestionValid(q) && !suspended[q.id] && !activeBury(q.id) && isReviewDue(schedules[q.id], clock)).slice(0, limit).map(q => q.id))} disabled={!dueCount} className="min-h-11 rounded-xl border px-4 text-sm font-bold disabled:opacity-40">Ôn câu đến hạn ({dueCount})</button><label className="inline-flex min-h-11 items-center gap-2 text-sm">Số câu<select className="min-h-11 rounded-xl border bg-white px-2 dark:bg-slate-900" value={limit} onChange={event => setLimit(Number(event.target.value))}><option value={20}>20</option><option value={40}>40</option><option value={100000}>Tất cả</option></select></label></div>
+         <div className="flex flex-wrap items-center gap-2 border-t pt-3 dark:border-slate-700"><button type="button" onClick={saveFilter} className="min-h-11 rounded-xl border px-3 text-sm font-semibold">Lưu bộ lọc</button>{savedFilters.map(saved => <span key={saved.id} className="inline-flex items-center rounded-xl border"><button type="button" onClick={() => setFilters({ ...saved.filters, categoryIds: [...saved.filters.categoryIds] })} className="min-h-11 px-3 text-xs font-semibold">{saved.name}</button><button type="button" onClick={() => setSavedFilters(old => old.filter(item => item.id !== saved.id))} aria-label={`Xóa bộ lọc ${saved.name}`} className="min-h-11 min-w-11 border-l dark:border-slate-700"><X size={15} className="mx-auto" /></button></span>)}</div>
+--- a/src/components/TestBlockCreator.tsx
++++ b/src/components/TestBlockCreator.tsx
+@@ -1,4 +1,5 @@
+ import React, { useState } from 'react';
++import { categoryPath, isFolder } from '../utils/categoryTree';
+ import { Category, CategorySelection, Question, TestConfig } from '../types/quiz';
+ import { generateQuestionsWithGemini } from '../services/gemini';
+ import { isQuestionValid, selectQuestionsForBlock } from '../utils/quizEngine';
+@@ -41,6 +42,7 @@
+   preselectedCategoryId,
+   onQuestionsGeneratedByAI,
+ }) => {
++  const questionCategories = categories.filter(category => !isFolder(category));
+   const [testTitle, setTestTitle] = useState('');
+   // Preset choice: '40q_30m' | '50q_40m' | 'custom'
+   const [presetType, setPresetType] = useState<'40q_30m' | '50q_40m' | 'custom'>('40q_30m');
+@@ -53,7 +55,7 @@
+   // Per category selection setup
+   const [categorySelections, setCategorySelections] = useState<Record<string, number>>(() => {
+     const initial: Record<string, number> = {};
+-    categories.forEach((c) => {
++    questionCategories.forEach((c) => {
+       if (preselectedCategoryId && c.id === preselectedCategoryId) {
+         initial[c.id] = Math.min(10, c.questionCount);
+       } else {
+@@ -65,7 +67,7 @@
+ 
+   const [selectedCatIds, setSelectedCatIds] = useState<Set<string>>(() => {
+     if (preselectedCategoryId) return new Set([preselectedCategoryId]);
+-    return new Set(categories.slice(0, 3).map((c) => c.id));
++    return new Set(questionCategories.slice(0, 3).map((c) => c.id));
+   });
+ 
+   // AI Block Generator Prompt
+@@ -116,7 +118,7 @@
+     const totalQ = getEffectiveTotalQuestions();
+     const timeM = getEffectiveTimeLimit();
+ 
+-    const formattedSelections: CategorySelection[] = categories
++    const formattedSelections: CategorySelection[] = questionCategories
+       .filter((c) => selectedCatIds.has(c.id))
+       .map((c) => ({
+         categoryId: c.id,
+@@ -393,7 +395,7 @@
+             </p>
+ 
+             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+-              {categories.map((cat) => {
++              {questionCategories.map((cat) => {
+                 const isChecked = selectedCatIds.has(cat.id);
+                 const currentCount = categorySelections[cat.id] ?? 5;
+                 const catValidCount = allQuestions.filter((q) => q.categoryId === cat.id && isQuestionValid(q)).length;
+@@ -417,7 +419,7 @@
+                       />
+                       <div className="min-w-0 flex-1">
+                         <div className="flex items-center space-x-1.5">
+-                          <p className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">{cat.name}</p>
++                          <p className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">{categoryPath(categories, cat.id)}</p>
+                           {catImagesCount > 0 && (
+                             <span className="text-[10px] px-1.5 py-0.2 rounded bg-indigo-100 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-bold shrink-0 flex items-center space-x-0.5">
+                               <ImageIcon className="w-2.5 h-2.5" />
+@@ -468,7 +470,7 @@
+         {selectionMode === 'random_mix' && (
+           <div className="p-4 bg-slate-50 dark:bg-slate-900/60 rounded-2xl border border-slate-200 dark:border-slate-700 space-y-2">
+             <p className="text-xs text-slate-700 dark:text-slate-300 font-medium">
+-              Hệ thống sẽ trộn ngẫu nhiên từ toàn bộ <strong className="text-indigo-600 dark:text-indigo-400">{totalAvailableQuestions} câu hỏi</strong> thuộc {categories.length} mục hiện có để đảm bảo tính khách quan toàn diện.
++              Hệ thống sẽ trộn ngẫu nhiên từ toàn bộ <strong className="text-indigo-600 dark:text-indigo-400">{totalAvailableQuestions} câu hỏi</strong> thuộc {questionCategories.length} mục hiện có để đảm bảo tính khách quan toàn diện.
+             </p>
+           </div>
+         )}
+--- a/src/types/quiz.ts
++++ b/src/types/quiz.ts
+@@ -23,6 +23,9 @@
+   id: string;
+   name: string;
+   description: string;
++  /** Older categories have no kind/parentId and remain question categories at the root. */
++  kind?: 'folder' | 'questions';
++  parentId?: string | null;
+   icon?: string;
+   color?: string;
+   questionCount: number;
+--- /dev/null
++++ b/src/components/CategoryTree.tsx
+@@ -0,0 +1,87 @@
++import React, { useMemo, useState } from 'react';
++import { ChevronDown, ChevronRight, Folder, FolderOpen, FolderPlus, Pencil, Search, Trash2 } from 'lucide-react';
++import type { Category, Question } from '../types/quiz';
++import { canMoveCategory, categoryPath, countQuestions, isFolder } from '../utils/categoryTree';
++
++interface Props {
++  categories: Category[];
++  questions: Question[];
++  selectedId: string | 'all';
++  onSelect: (id: string | 'all') => void;
++  onCreateFolder: (name: string, description: string, parentId: string | null) => void;
++  onUpdateCategory: (id: string, name: string, description: string, parentId: string | null) => void;
++  onDeleteFolder: (id: string) => void;
++  onCreateQuestionCategory: () => void;
++}
++
++export const CategoryTree: React.FC<Props> = ({
++  categories, questions, selectedId, onSelect, onCreateFolder, onUpdateCategory, onDeleteFolder, onCreateQuestionCategory,
++}) => {
++  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(categories.filter(isFolder).map(category => category.id)));
++  const [search, setSearch] = useState('');
++  const [editing, setEditing] = useState<Category | 'new' | null>(null);
++  const [name, setName] = useState('');
++  const [description, setDescription] = useState('');
++  const [parentId, setParentId] = useState<string | null>(null);
++  const byId = useMemo(() => new Map(categories.map(category => [category.id, category])), [categories]);
++  const children = useMemo(() => {
++    const map = new Map<string | null, Category[]>();
++    for (const category of categories) {
++      const parent = category.parentId && byId.get(category.parentId);
++      const key = parent && isFolder(parent) ? parent.id : null;
++      map.set(key, [...(map.get(key) || []), category]);
++    }
++    return map;
++  }, [categories, byId]);
++  const counts = useMemo(() => new Map(categories.map(category => [category.id, countQuestions(categories, questions, category.id)])), [categories, questions]);
++  const needle = search.trim().toLocaleLowerCase('vi-VN');
++  const matches = (category: Category, visited = new Set<string>()): boolean => {
++    if (!needle) return true;
++    if (category.name.toLocaleLowerCase('vi-VN').includes(needle)) return true;
++    if (visited.has(category.id)) return false;
++    visited.add(category.id);
++    return (children.get(category.id) || []).some(child => matches(child, visited));
++  };
++  const startCreate = (parent: string | null = null) => {
++    setEditing('new'); setName(''); setDescription(''); setParentId(parent);
++    if (parent) setExpanded(previous => new Set(previous).add(parent));
++  };
++  const startEdit = (category: Category) => {
++    setEditing(category); setName(category.name); setDescription(category.description || ''); setParentId(category.parentId || null);
++  };
++  const save = (event: React.FormEvent) => {
++    event.preventDefault();
++    if (!name.trim()) return;
++    if (editing === 'new') onCreateFolder(name, description, parentId);
++    else if (editing) onUpdateCategory(editing.id, name, description, parentId);
++    setEditing(null);
++  };
++  const renderNode = (category: Category, depth: number, visited: Set<string>): React.ReactNode => {
++    if (visited.has(category.id) || !matches(category)) return null;
++    const nextVisited = new Set(visited).add(category.id);
++    const folder = isFolder(category);
++    const nested = children.get(category.id) || [];
++    const opened = needle || expanded.has(category.id);
++    return <li key={category.id}>
++      <div className={`group flex min-h-11 items-center gap-1 rounded-xl px-2 text-sm ${selectedId === category.id ? 'bg-indigo-100 text-indigo-900 dark:bg-indigo-900/50 dark:text-indigo-100' : 'hover:bg-slate-100 dark:hover:bg-slate-700'}`} style={{ paddingLeft: `${Math.min(depth, 8) * 14 + 8}px` }}>
++        {folder && nested.length > 0 ? <button type="button" aria-label={`${opened ? 'Thu gọn' : 'Mở rộng'} ${category.name}`} onClick={() => setExpanded(previous => { const next = new Set(previous); if (next.has(category.id)) next.delete(category.id); else next.add(category.id); return next; })} className="flex h-9 w-8 shrink-0 items-center justify-center">{opened ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</button> : <span className="w-8 shrink-0" />}
++        <button type="button" onClick={() => onSelect(category.id)} className="flex min-w-0 flex-1 items-center gap-2 py-2 text-left" title={categoryPath(categories, category.id)}>
++          {folder ? opened ? <FolderOpen size={17} className="shrink-0 text-amber-500" /> : <Folder size={17} className="shrink-0 text-amber-500" /> : <span className="shrink-0 text-indigo-500">▤</span>}
++          <span className="truncate">{category.name}</span><span className="ml-auto shrink-0 text-xs tabular-nums opacity-65">{counts.get(category.id) || 0}</span>
++        </button>
++        <button type="button" onClick={() => startEdit(category)} aria-label={`Sửa ${category.name}`} title="Đổi tên hoặc chuyển vào thư mục" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:text-indigo-600"><Pencil size={14} /></button>
++        {folder && <button type="button" onClick={() => startCreate(category.id)} aria-label={`Tạo thư mục trong ${category.name}`} title="Tạo thư mục con" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:text-indigo-600"><FolderPlus size={15} /></button>}
++        {folder && !nested.length && !counts.get(category.id) && <button type="button" onClick={() => { if (window.confirm(`Xóa thư mục rỗng “${category.name}”?`)) { onDeleteFolder(category.id); if (selectedId === category.id) onSelect('all'); } }} aria-label={`Xóa thư mục ${category.name}`} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:text-rose-600"><Trash2 size={14} /></button>}
++      </div>
++      {folder && opened && nested.length > 0 && <ul>{nested.map(child => renderNode(child, depth + 1, nextVisited))}</ul>}
++    </li>;
++  };
++
++  return <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-800" aria-label="Mạng lưới mục">
++    <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-bold text-slate-900 dark:text-white">Mạng lưới mục</h2><p className="text-xs text-slate-500 dark:text-slate-400">Chọn thư mục để xem câu hỏi ở mọi cấp bên trong.</p></div><div className="flex flex-wrap gap-2"><button type="button" onClick={() => startCreate()} className="inline-flex min-h-11 items-center gap-1 rounded-xl bg-indigo-600 px-3 text-xs font-bold text-white"><FolderPlus size={16} /> Tạo thư mục</button><button type="button" onClick={onCreateQuestionCategory} className="min-h-11 rounded-xl border px-3 text-xs font-bold">+ Mục chứa câu hỏi</button></div></div>
++    <label className="relative mt-4 block"><Search size={17} className="absolute left-3 top-3 text-slate-400" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Tìm thư mục hoặc mục đề thi…" className="min-h-11 w-full rounded-xl border bg-transparent pl-10 pr-3 text-sm dark:border-slate-600" /></label>
++    <ul className="mt-2 max-h-96 overflow-y-auto"><li><button type="button" onClick={() => onSelect('all')} className={`flex min-h-11 w-full items-center justify-between rounded-xl px-3 text-left text-sm font-semibold ${selectedId === 'all' ? 'bg-indigo-600 text-white' : 'hover:bg-slate-100 dark:hover:bg-slate-700'}`}><span>Tất cả câu hỏi</span><span>{questions.length}</span></button></li>{(children.get(null) || []).map(category => renderNode(category, 0, new Set()))}</ul>
++    {selectedId !== 'all' && byId.has(selectedId) && <p className="mt-3 break-words border-t pt-3 text-xs text-slate-500 dark:border-slate-700">Đang xem: {categoryPath(categories, selectedId)} · {counts.get(selectedId) || 0} câu</p>}
++    {editing && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"><form onSubmit={save} className="w-full max-w-md space-y-4 rounded-2xl bg-white p-5 shadow-2xl dark:bg-slate-800"><h3 className="font-bold">{editing === 'new' ? 'Tạo thư mục mới' : `Sửa ${isFolder(editing) ? 'thư mục' : 'mục câu hỏi'}`}</h3><label className="block text-sm font-semibold">Tên<input required maxLength={100} value={name} onChange={event => setName(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border px-3 dark:bg-slate-900" /></label><label className="block text-sm font-semibold">Mô tả<textarea rows={2} value={description} onChange={event => setDescription(event.target.value)} className="mt-1 w-full rounded-xl border p-3 dark:bg-slate-900" /></label><label className="block text-sm font-semibold">Nằm trong thư mục<select value={parentId || ''} onChange={event => setParentId(event.target.value || null)} className="mt-1 min-h-11 w-full rounded-xl border px-3 dark:bg-slate-900"><option value="">Ngoài cùng</option>{categories.filter(category => isFolder(category) && (editing === 'new' || canMoveCategory(categories, editing.id, category.id))).map(category => <option key={category.id} value={category.id}>{categoryPath(categories, category.id)}</option>)}</select></label><div className="flex justify-end gap-2"><button type="button" onClick={() => setEditing(null)} className="min-h-11 rounded-xl px-4 text-sm">Hủy</button><button type="submit" className="min-h-11 rounded-xl bg-indigo-600 px-4 text-sm font-bold text-white">Lưu</button></div></form></div>}
++  </section>;
++};
+--- /dev/null
++++ b/src/utils/categoryTree.ts
+@@ -0,0 +1,45 @@
++import type { Category, Question } from '../types/quiz';
++
++export const isFolder = (category: Category) => category.kind === 'folder';
++
++/** Includes the chosen node and all descendants. A visited set tolerates damaged legacy data. */
++export function subtreeIds(categories: Category[], id: string): Set<string> {
++  const result = new Set<string>();
++  const children = new Map<string, string[]>();
++  for (const category of categories) {
++    if (!category.parentId) continue;
++    children.set(category.parentId, [...(children.get(category.parentId) || []), category.id]);
++  }
++  const visit = (current: string) => {
++    if (result.has(current)) return;
++    result.add(current);
++    for (const child of children.get(current) || []) visit(child);
++  };
++  visit(id);
++  return result;
++}
++
++export function countQuestions(categories: Category[], questions: Question[], id: string): number {
++  const ids = subtreeIds(categories, id);
++  return questions.filter(question => ids.has(question.categoryId)).length;
++}
++
++export function canMoveCategory(categories: Category[], id: string, parentId: string | null): boolean {
++  if (!categories.some(category => category.id === id)) return false;
++  if (!parentId) return true;
++  const parent = categories.find(category => category.id === parentId);
++  return !!parent && isFolder(parent) && !subtreeIds(categories, id).has(parentId);
++}
++
++export function categoryPath(categories: Category[], id: string): string {
++  const byId = new Map(categories.map(category => [category.id, category]));
++  const parts: string[] = [];
++  const visited = new Set<string>();
++  let current = byId.get(id);
++  while (current && !visited.has(current.id)) {
++    visited.add(current.id);
++    parts.unshift(current.name);
++    current = current.parentId ? byId.get(current.parentId) : undefined;
++  }
++  return parts.join(' / ');
++}
+--- /dev/null
++++ b/src/utils/categoryTree.test.ts
+@@ -0,0 +1,29 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import type { Category, Question } from '../types/quiz';
++import { canMoveCategory, categoryPath, countQuestions, subtreeIds } from './categoryTree';
++
++const categories: Category[] = [
++  { id: 'base', name: 'Cơ sở', description: '', kind: 'folder', questionCount: 0, createdAt: '' },
++  { id: 'anatomy', name: 'Giải phẫu', description: '', kind: 'folder', parentId: 'base', questionCount: 0, createdAt: '' },
++  { id: 'upper', name: 'GP chi trên', description: '', parentId: 'anatomy', questionCount: 2, createdAt: '' },
++  { id: 'lower', name: 'GP chi dưới', description: '', parentId: 'anatomy', questionCount: 1, createdAt: '' },
++  { id: 'legacy', name: 'Mục cũ', description: '', questionCount: 1, createdAt: '' },
++];
++const question = (id: string, categoryId: string): Question => ({ id, categoryId, categoryName: '', question: id, options: ['A', 'B'], correctAnswer: 0 });
++const questions = [question('q1', 'upper'), question('q2', 'upper'), question('q3', 'lower'), question('q4', 'legacy')];
++
++test('nested groups count descendants without touching legacy categories', () => {
++  assert.equal(categoryPath(categories, 'upper'), 'Cơ sở / Giải phẫu / GP chi trên');
++  assert.deepEqual([...subtreeIds(categories, 'anatomy')], ['anatomy', 'upper', 'lower']);
++  assert.equal(countQuestions(categories, questions, 'base'), 3);
++  assert.equal(countQuestions(categories, questions, 'legacy'), 1);
++});
++
++test('moving a group into itself, its child or a question category is rejected', () => {
++  assert.equal(canMoveCategory(categories, 'base', 'anatomy'), false);
++  assert.equal(canMoveCategory(categories, 'anatomy', 'anatomy'), false);
++  assert.equal(canMoveCategory(categories, 'upper', 'legacy'), false);
++  assert.equal(canMoveCategory(categories, 'upper', 'base'), true);
++  assert.equal(canMoveCategory(categories, 'anatomy', null), true);
++});

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Question, TestConfig } from '../types/quiz';
+import { OptionContent } from './OptionContent';
 import { formatTimeMinutesSeconds } from '../utils/quizEngine';
 import {
   Clock,
@@ -302,7 +303,7 @@ export const TestRunner: React.FC<TestRunnerProps> = ({
                     >
                       {letter}
                     </span>
-                    <span className="text-sm font-medium leading-relaxed pt-0.5 flex-1">{option}</span>
+                    <OptionContent text={option} images={currentQuestion.optionImages?.[optIndex]} letter={letter} onZoom={setZoomImage} />
                   </button>
                 );
               })}

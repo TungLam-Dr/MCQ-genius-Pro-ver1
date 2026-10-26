@@ -1,0 +1,297 @@
+git pull
+diff --git a/src/App.tsx b/src/App.tsx
+index e1402b4..4582266 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -547,7 +547,7 @@ export default function App() {
+               >
+                 <span className="flex items-center gap-3">
+                   <span className="rounded-xl bg-indigo-100 p-2.5 text-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-300"><List className="h-5 w-5" /></span>
+-                  <span><span className="block text-sm font-bold text-slate-900 dark:text-white">Danh sách câu hỏi</span><span className="text-xs text-slate-500 dark:text-slate-400">{questions.length} câu</span></span>
++                  <span><span className="block text-sm font-bold text-slate-900 dark:text-white">Ngân hàng câu hỏi</span><span className="text-xs text-slate-500 dark:text-slate-400">{questions.length} câu</span></span>
+                 </span>
+                 <ChevronRight className="h-5 w-5 shrink-0 text-indigo-500 transition-transform group-hover:translate-x-1" />
+               </button>
+@@ -616,8 +616,8 @@ export default function App() {
+             <div className="flex flex-wrap items-center justify-between gap-4">
+               <div>
+                 <button type="button" onClick={() => setActiveTab('home')} className="mb-2 inline-flex items-center gap-1.5 text-sm font-semibold text-indigo-700 hover:underline dark:text-indigo-300"><ArrowLeft className="h-4 w-4" /> Trang chủ</button>
+-                <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Danh sách câu hỏi</h1>
+-                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{questions.length} câu hỏi trong {categories.length} mục</p>
++                <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Ngân hàng câu hỏi</h1>
++                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Tìm, lọc và quản lý {questions.length} câu hỏi trong {categories.length} mục.</p>
+               </div>
+             </div>
+             <CategoryManager
+@@ -626,6 +626,7 @@ export default function App() {
+               initialCategoryId={questionListCategoryId}
+               categories={categories}
+               questions={questions}
++              questionAttempts={questionAttempts}
+               onAddCategory={handleAddCategory}
+               onDeleteCategory={handleDeleteCategory}
+               onDeleteQuestion={handleDeleteQuestion}
+diff --git a/src/components/CategoryManager.tsx b/src/components/CategoryManager.tsx
+index 2ce471d..30c7af8 100644
+--- a/src/components/CategoryManager.tsx
++++ b/src/components/CategoryManager.tsx
+@@ -1,5 +1,5 @@
+-import React, { useState } from 'react';
+-import { Category, Question } from '../types/quiz';
++import React, { useMemo, useState } from 'react';
++import { Category, Question, QuestionAttempt } from '../types/quiz';
+ import {
+   FolderPlus,
+   Search,
+@@ -27,6 +27,7 @@ import {
+ interface CategoryManagerProps {
+   categories: Category[];
+   questions: Question[];
++  questionAttempts?: QuestionAttempt[];
+   onAddCategory: (categoryName: string, description: string) => void;
+   onDeleteCategory: (categoryId: string) => void;
+   onDeleteQuestion: (questionId: string) => void;
+@@ -52,9 +53,14 @@ const ICON_MAP: Record<string, React.ElementType> = {
+   FileText,
+ };
+ 
++const needsAnswer = (question: Question) =>
++  question.options.length < 2 || !Number.isInteger(question.correctAnswer) ||
++  question.correctAnswer < 0 || question.correctAnswer >= question.options.length;
++
+ export const CategoryManager: React.FC<CategoryManagerProps> = ({
+   categories,
+   questions,
++  questionAttempts = [],
+   onAddCategory,
+   onDeleteCategory,
+   onDeleteQuestion,
+@@ -72,6 +78,9 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
+   const [selectedCategoryId, setSelectedCategoryId] = useState<string | 'all'>(initialCategoryId);
+   const [searchQuery, setSearchQuery] = useState('');
+   const [filterDifficulty, setFilterDifficulty] = useState<string>('all');
++  const [practiceFilter, setPracticeFilter] = useState<'all' | 'unanswered' | 'unattempted' | 'attempted' | 'mistaken'>('all');
++  const [sortMode, setSortMode] = useState<'recent' | 'most-wrong' | 'most-practiced'>('recent');
++  const [page, setPage] = useState(1);
+   const [showAddCatModal, setShowAddCatModal] = useState(false);
+   const [newCatName, setNewCatName] = useState('');
+   const [newCatDesc, setNewCatDesc] = useState('');
+@@ -93,21 +102,61 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
+   const [editingExplanation, setEditingExplanation] = useState('');
+   const [editingOptions, setEditingOptions] = useState<string[]>([]);
+ 
+-  // Filtered questions
++  const practiceStats = useMemo(() => {
++    const stats = new Map<string, { answered: number; incorrect: number }>();
++    questionAttempts.forEach((attempt) => {
++      const previous = stats.get(attempt.questionId) || { answered: 0, incorrect: 0 };
++      stats.set(attempt.questionId, {
++        answered: previous.answered + (attempt.answered ? 1 : 0),
++        incorrect: previous.incorrect + (attempt.answered && !attempt.correct ? 1 : 0),
++      });
++    });
++    return stats;
++  }, [questionAttempts]);
++
++  const bankCounts = useMemo(() => {
++    const scoped = selectedCategoryId === 'all' ? questions : questions.filter((question) => question.categoryId === selectedCategoryId);
++    return {
++      all: scoped.length,
++      unanswered: scoped.filter(needsAnswer).length,
++      unattempted: scoped.filter((question) => (practiceStats.get(question.id)?.answered || 0) === 0).length,
++      attempted: scoped.filter((question) => (practiceStats.get(question.id)?.answered || 0) > 0).length,
++      mistaken: scoped.filter((question) => (practiceStats.get(question.id)?.incorrect || 0) > 0).length,
++    };
++  }, [questions, practiceStats, selectedCategoryId]);
++
++  // Search and practice filters share the same question bank.
++  const normalizedSearch = searchQuery.trim().toLowerCase();
+   const filteredQuestions = questions.filter((q) => {
+     const matchCat = selectedCategoryId === 'all' || q.categoryId === selectedCategoryId;
+     const matchSearch =
+-      q.question.toLowerCase().includes(searchQuery.toLowerCase()) ||
+-      q.options.some((opt) => opt.toLowerCase().includes(searchQuery.toLowerCase())) ||
+-      (q.explanation && q.explanation.toLowerCase().includes(searchQuery.toLowerCase()));
++      q.question.toLowerCase().includes(normalizedSearch) ||
++      q.options.some((opt) => opt.toLowerCase().includes(normalizedSearch)) ||
++      (q.explanation || '').toLowerCase().includes(normalizedSearch) ||
++      (q.sourceId || '').toLowerCase().includes(normalizedSearch) ||
++      String(q.sourceNumber ?? '').includes(normalizedSearch) ||
++      (q.categoryName || '').toLowerCase().includes(normalizedSearch);
+     const matchDiff = filterDifficulty === 'all' || q.difficulty === filterDifficulty;
+-    const matchAnswer = !unansweredOnly || q.options.length < 2 || !Number.isInteger(q.correctAnswer) || q.correctAnswer < 0 || q.correctAnswer >= q.options.length;
+-
+-    return matchCat && matchSearch && matchDiff && matchAnswer;
++    const stats = practiceStats.get(q.id);
++    const matchAnswer = !unansweredOnly || needsAnswer(q);
++    const matchPractice = unansweredOnly || practiceFilter === 'all' ||
++      (practiceFilter === 'unanswered' && needsAnswer(q)) ||
++      (practiceFilter === 'unattempted' && !stats?.answered) ||
++      (practiceFilter === 'attempted' && !!stats?.answered) ||
++      (practiceFilter === 'mistaken' && !!stats?.incorrect);
++
++    return matchCat && matchSearch && matchDiff && matchAnswer && matchPractice;
++  });
++  const visibleQuestionCount = unansweredOnly ? questions.filter(needsAnswer).length : questions.length;
++  const sortedQuestions = [...filteredQuestions].sort((a, b) => {
++    if (sortMode === 'most-wrong') return (practiceStats.get(b.id)?.incorrect || 0) - (practiceStats.get(a.id)?.incorrect || 0);
++    if (sortMode === 'most-practiced') return (practiceStats.get(b.id)?.answered || 0) - (practiceStats.get(a.id)?.answered || 0);
++    return 0; // Preserve bank order for the default view.
+   });
+-  const visibleQuestionCount = unansweredOnly
+-    ? questions.filter((q) => q.options.length < 2 || !Number.isInteger(q.correctAnswer) || q.correctAnswer < 0 || q.correctAnswer >= q.options.length).length
+-    : questions.length;
++  const pageSize = 30;
++  const totalPages = Math.max(1, Math.ceil(sortedQuestions.length / pageSize));
++  const currentPage = Math.min(page, totalPages);
++  const pageQuestions = sortedQuestions.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+ 
+   const openAnswerEditor = (question: Question) => {
+     setEditingQuestion(question);
+@@ -314,8 +363,8 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
+           <div className="flex items-center gap-2 overflow-x-auto pb-2 border-b border-slate-100 dark:border-slate-700/60">
+             <button
+               type="button"
+-              onClick={() => setSelectedCategoryId('all')}
+-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5 ${
++              onClick={() => { setSelectedCategoryId('all'); setPage(1); }}
++              className={`min-h-11 px-3 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5 ${
+                 selectedCategoryId === 'all'
+                   ? 'bg-indigo-600 text-white shadow-sm'
+                   : 'bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+@@ -325,14 +374,14 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
+               <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-black/10 dark:bg-white/10">{visibleQuestionCount}</span>
+             </button>
+             {categories.map((cat) => {
+-              const count = questions.filter((q) => q.categoryId === cat.id && (!unansweredOnly || q.options.length < 2 || !Number.isInteger(q.correctAnswer) || q.correctAnswer < 0 || q.correctAnswer >= q.options.length)).length;
++              const count = questions.filter((q) => q.categoryId === cat.id && (!unansweredOnly || needsAnswer(q))).length;
+               const isSel = selectedCategoryId === cat.id;
+               return (
+                 <button
+                   key={cat.id}
+                   type="button"
+-                  onClick={() => setSelectedCategoryId(cat.id)}
+-                  className={`px-3 py-1.5 rounded-xl text-xs transition-all shrink-0 flex items-center gap-1.5 ${
++                  onClick={() => { setSelectedCategoryId(cat.id); setPage(1); }}
++                  className={`min-h-11 px-3 py-1.5 rounded-xl text-xs transition-all shrink-0 flex items-center gap-1.5 ${
+                     isSel
+                       ? 'bg-indigo-600 text-white shadow-sm font-bold'
+                       : 'bg-slate-100 hover:bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300 font-medium'
+@@ -344,11 +393,34 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
+               );
+             })}
+           </div>
++          {!unansweredOnly && (
++            <div className="flex items-center gap-2 overflow-x-auto pb-2" aria-label="Lọc theo tình trạng học tập">
++              {([
++                ['all', 'Tất cả'],
++                ['unattempted', 'Chưa làm'],
++                ['attempted', 'Đã làm'],
++                ['mistaken', 'Từng làm sai'],
++                ['unanswered', 'Chưa có đáp án'],
++              ] as const).map(([filter, label]) => (
++                <button
++                  key={filter}
++                  type="button"
++                  onClick={() => { setPracticeFilter(filter); setPage(1); }}
++                  aria-pressed={practiceFilter === filter}
++                  className={`min-h-11 shrink-0 rounded-xl border px-3 text-xs font-bold transition-colors ${practiceFilter === filter
++                    ? 'border-indigo-600 bg-indigo-600 text-white'
++                    : 'border-slate-200 bg-white text-slate-700 hover:border-indigo-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200'}`}
++                >
++                  {label} <span className="ml-1 opacity-75">{bankCounts[filter]}</span>
++                </button>
++              ))}
++            </div>
++          )}
+         <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pb-4 border-b border-slate-200 dark:border-slate-700">
+           <div>
+             <div className="flex items-center space-x-2">
+               <h3 className="font-bold text-slate-900 dark:text-slate-100 text-base">
+-                Danh Sách Câu Hỏi ({filteredQuestions.length})
++                {unansweredOnly ? 'Câu hỏi chưa có đáp án' : 'Ngân hàng câu hỏi'} ({filteredQuestions.length})
+               </h3>
+               {selectedCategoryId !== 'all' && currentSelectedCategoryObj && (
+                 <div className="flex items-center space-x-2">
+@@ -373,21 +445,33 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
+             </p>
+           </div>
+ 
+-          <div className="flex items-center space-x-2 w-full sm:w-auto">
+-            <div className="relative flex-1 sm:w-64">
++          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
++            <div className="relative flex-1 min-w-[180px] sm:w-56">
+               <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+               <input
+                 type="text"
+                 value={searchQuery}
+-                onChange={(e) => setSearchQuery(e.target.value)}
+-                placeholder="Tìm nội dung câu hỏi..."
+-                className="w-full pl-9 pr-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-xl focus:ring-2 focus:ring-indigo-500 text-slate-800 dark:text-slate-200"
++                onChange={(e) => { setSearchQuery(e.target.value); setPage(1); }}
++                placeholder="Tìm câu hỏi, mã câu, lời giải..."
++                aria-label="Tìm câu hỏi"
++                className="w-full min-h-11 pl-9 pr-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-xl focus:ring-2 focus:ring-indigo-500 text-slate-800 dark:text-slate-200"
+               />
+             </div>
+ 
++            <select
++              value={sortMode}
++              onChange={(event) => { setSortMode(event.target.value as typeof sortMode); setPage(1); }}
++              aria-label="Sắp xếp câu hỏi"
++              className="min-h-11 rounded-xl border border-slate-300 bg-white px-2 text-xs font-semibold text-slate-800 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
++            >
++              <option value="recent">Mới nhập trước</option>
++              <option value="most-wrong">Sai nhiều trước</option>
++              <option value="most-practiced">Làm nhiều trước</option>
++            </select>
++
+             <button
+               onClick={() => setShowAddQuestionModal(true)}
+-              className="flex items-center space-x-1 px-3 py-1.5 bg-slate-900 dark:bg-slate-700 hover:bg-slate-800 text-white text-xs font-semibold rounded-xl whitespace-nowrap"
++              className="flex min-h-11 items-center space-x-1 px-3 py-1.5 bg-slate-900 dark:bg-slate-700 hover:bg-slate-800 text-white text-xs font-semibold rounded-xl whitespace-nowrap"
+             >
+               <Plus className="w-3.5 h-3.5" />
+               <span>Thêm Thủ Công</span>
+@@ -403,8 +487,8 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
+             <p className="text-xs text-slate-400">{unansweredOnly ? 'Không còn câu hỏi thiếu đáp án trong mục đang xem.' : 'Hãy nhấn "Tải Đề Từ Docs/Excel/PDF" hoặc thêm câu hỏi mới vào mục này.'}</p>
+           </div>
+         ) : (
+-          <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
+-            {filteredQuestions.map((q, index) => {
++          <div className="space-y-3">
++            {pageQuestions.map((q, index) => {
+               const isUnanswered =
+                 q.correctAnswer === undefined ||
+                 q.correctAnswer === null ||
+@@ -423,10 +507,13 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
+                   <div className="flex items-start justify-between gap-3">
+                     <div className="space-y-1">
+                       <div className="flex items-center space-x-2 flex-wrap gap-y-1">
+-                        <span className="font-bold text-xs text-indigo-600 dark:text-indigo-400">Câu {index + 1}</span>
++                        <span className="font-bold text-xs text-indigo-600 dark:text-indigo-400">Câu {q.sourceNumber ?? (currentPage - 1) * pageSize + index + 1}</span>
+                         <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                           {q.categoryName || 'Mục chung'}
+                         </span>
++                        <span className="text-[10px] text-slate-500 dark:text-slate-400">
++                          Đã làm {practiceStats.get(q.id)?.answered || 0} lần · Sai {practiceStats.get(q.id)?.incorrect || 0} lần
++                        </span>
+ 
+                         {isUnanswered && (
+                           <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-200 font-bold border border-amber-300/60 flex items-center space-x-1">
+@@ -534,6 +621,15 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
+           })}
+           </div>
+         )}
++        {filteredQuestions.length > pageSize && (
++          <div className="flex items-center justify-between gap-3 border-t border-slate-200 pt-4 text-xs font-semibold text-slate-600 dark:border-slate-700 dark:text-slate-300">
++            <span>Trang {currentPage}/{totalPages} · {filteredQuestions.length} câu</span>
++            <div className="flex gap-2">
++              <button type="button" disabled={currentPage <= 1} onClick={() => setPage(currentPage - 1)} className="min-h-11 rounded-xl border border-slate-300 px-3 disabled:opacity-40 dark:border-slate-600">Trước</button>
++              <button type="button" disabled={currentPage >= totalPages} onClick={() => setPage(currentPage + 1)} className="min-h-11 rounded-xl border border-slate-300 px-3 disabled:opacity-40 dark:border-slate-600">Tiếp</button>
++            </div>
++          </div>
++        )}
+       </div>
+       )}
+ 

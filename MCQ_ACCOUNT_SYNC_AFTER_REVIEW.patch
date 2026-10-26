@@ -1,0 +1,574 @@
+diff --git a/SUPABASE_ACCOUNT_SYNC.sql b/SUPABASE_ACCOUNT_SYNC.sql
+new file mode 100644
+index 0000000..8c24ebd
+--- /dev/null
++++ b/SUPABASE_ACCOUNT_SYNC.sql
+@@ -0,0 +1,47 @@
++-- Chạy một lần trong SQL Editor của đúng Supabase project đang chạy app.
++-- Chỉ khóa publishable/anon được đưa vào trình duyệt; service_role chỉ ở Vercel server.
++create table if not exists public.mcq_sync_heads (
++  user_id uuid primary key references auth.users(id) on delete cascade,
++  revision uuid not null,
++  manifest jsonb not null,
++  updated_at timestamptz not null default now()
++);
++alter table public.mcq_sync_heads enable row level security;
++grant select, insert, update on public.mcq_sync_heads to authenticated;
++drop policy if exists "Read own sync head" on public.mcq_sync_heads;
++drop policy if exists "Insert own sync head" on public.mcq_sync_heads;
++drop policy if exists "Update own sync head" on public.mcq_sync_heads;
++create policy "Read own sync head" on public.mcq_sync_heads for select to authenticated using (user_id = (select auth.uid()));
++create policy "Insert own sync head" on public.mcq_sync_heads for insert to authenticated with check (user_id = (select auth.uid()));
++create policy "Update own sync head" on public.mcq_sync_heads for update to authenticated using (user_id = (select auth.uid())) with check (user_id = (select auth.uid()));
++
++create or replace function public.mcq_commit_sync(p_expected uuid, p_revision uuid, p_manifest jsonb)
++returns boolean language plpgsql security invoker set search_path = public, pg_temp as $$
++begin
++  if (select auth.uid()) is null then raise exception 'Login required'; end if;
++  if p_expected is null then
++    insert into public.mcq_sync_heads(user_id, revision, manifest)
++    values ((select auth.uid()), p_revision, p_manifest)
++    on conflict (user_id) do nothing;
++  else
++    update public.mcq_sync_heads set revision = p_revision, manifest = p_manifest, updated_at = now()
++    where user_id = (select auth.uid()) and revision = p_expected;
++  end if;
++  return found;
++end;
++$$;
++revoke all on function public.mcq_commit_sync(uuid, uuid, jsonb) from public;
++grant execute on function public.mcq_commit_sync(uuid, uuid, jsonb) to authenticated;
++
++insert into storage.buckets (id, name, public) values ('mcq-private-sync', 'mcq-private-sync', false)
++on conflict (id) do update set public = false;
++
++drop policy if exists "Upload own sync chunks" on storage.objects;
++drop policy if exists "Read own sync chunks" on storage.objects;
++drop policy if exists "Delete own sync chunks" on storage.objects;
++create policy "Upload own sync chunks" on storage.objects for insert to authenticated
++with check (bucket_id = 'mcq-private-sync' and (storage.foldername(name))[1] = (select auth.uid())::text);
++create policy "Read own sync chunks" on storage.objects for select to authenticated
++using (bucket_id = 'mcq-private-sync' and (storage.foldername(name))[1] = (select auth.uid())::text);
++create policy "Delete own sync chunks" on storage.objects for delete to authenticated
++using (bucket_id = 'mcq-private-sync' and (storage.foldername(name))[1] = (select auth.uid())::text);
+diff --git a/src/App.tsx b/src/App.tsx
+index bc9811a..ab0e739 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1,10 +1,11 @@
+-import React, { useState, useEffect, Suspense, lazy } from 'react';
++import React, { useState, useEffect, useMemo, Suspense, lazy } from 'react';
+ import { Category, Question, QuestionAttempt, ReviewGrade, ReviewSchedule, SharedExamDraft, StudyFlagColor, TestConfig, TestResult } from './types/quiz';
+ import { INITIAL_CATEGORIES, INITIAL_QUESTIONS } from './data/defaultQuestions';
+ import { selectQuestionsForBlock, calculateTestResult, isQuestionValid } from './utils/quizEngine';
+ import { buildQuestionAttempts } from './utils/analytics';
+ import { categorizeQuestionsWithGemini } from './services/gemini';
+-import { setStorageItem, getStorageItem } from './utils/storage';
++import { setStorageItem, getStorageItem, replaceStoredSnapshot } from './utils/storage';
++import type { CloudSnapshot } from './services/cloudSync';
+ import { scheduleReview } from './utils/reviewScheduler';
+ import { Navbar } from './components/Navbar';
+ import { CategoryManager } from './components/CategoryManager';
+@@ -27,6 +28,7 @@ import {
+   AlertTriangle,
+   PanelLeft,
+   BookOpen,
++  Cloud,
+ } from 'lucide-react';
+ 
+ const FileUploadModal = lazy(() => import('./components/FileUploadModal').then(module => ({ default: module.FileUploadModal })));
+@@ -37,6 +39,7 @@ const AnalyticsDashboard = lazy(() => import('./components/AnalyticsDashboard').
+ const GuestExamPreview = lazy(() => import('./components/GuestExamPreview').then(module => ({ default: module.GuestExamPreview })));
+ const QuestionBrowser = lazy(() => import('./components/QuestionBrowser').then(module => ({ default: module.QuestionBrowser })));
+ const StudyReview = lazy(() => import('./components/StudyReview').then(module => ({ default: module.StudyReview })));
++const CloudSyncPanel = lazy(() => import('./components/CloudSyncPanel').then(module => ({ default: module.CloudSyncPanel })));
+ 
+ export default function App() {
+   const [categories, setCategories] = useState<Category[]>(INITIAL_CATEGORIES);
+@@ -55,7 +58,7 @@ export default function App() {
+   const [storageError, setStorageError] = useState('');
+ 
+   // The question bank has its own page; the home page stays compact.
+-  const [activeTab, setActiveTab] = useState<'home' | 'questions' | 'browser' | 'review' | 'unanswered' | 'history' | 'create-test' | 'runner' | 'result' | 'analyze' | 'share-drafts' | 'share-preview'>('home');
++  const [activeTab, setActiveTab] = useState<'home' | 'questions' | 'browser' | 'review' | 'sync' | 'unanswered' | 'history' | 'create-test' | 'runner' | 'result' | 'analyze' | 'share-drafts' | 'share-preview'>('home');
+   const [questionListCategoryId, setQuestionListCategoryId] = useState<string | 'all'>('all');
+ 
+   // Modals & Selection states
+@@ -71,6 +74,7 @@ export default function App() {
+   const [resultFilter, setResultFilter] = useState<ReviewFilter>('all');
+   const [viewingSavedResult, setViewingSavedResult] = useState(false);
+   const [resultReturnTab, setResultReturnTab] = useState<'history' | 'analyze'>('history');
++  const syncChange = useMemo(() => ({}), [categories, questions, testHistory, questionAttempts, shareDrafts, studyFlags, studyFlagColors, reviewSchedule, suspendedQuestions, buriedQuestions]);
+ 
+   // Hydrate full data from IndexedDB on initial mount
+   useEffect(() => {
+@@ -310,6 +314,36 @@ export default function App() {
+     setQuestions(previous => previous.map(question => question.id === id ? { ...question, tags } : question));
+   };
+ 
++  const captureCloudSnapshot = async (): Promise<CloudSnapshot> => ({
++    version: 1,
++    mcq_genius_categories: categories,
++    mcq_genius_questions: questions,
++    mcq_genius_history: testHistory,
++    mcq_genius_attempts: questionAttempts,
++    mcq_genius_share_drafts: shareDrafts,
++    mcq_genius_study_flags: studyFlags,
++    mcq_genius_study_flag_colors: studyFlagColors,
++    mcq_genius_review_schedule: reviewSchedule,
++    mcq_genius_suspended: suspendedQuestions,
++    mcq_genius_buried_until: buriedQuestions,
++    mcq_genius_saved_review_filters: await getStorageItem<unknown[]>('mcq_genius_saved_review_filters', []),
++  });
++
++  const restoreCloudSnapshot = async (snapshot: CloudSnapshot) => {
++    await replaceStoredSnapshot(snapshot);
++    setCategories(snapshot.mcq_genius_categories);
++    setQuestions(snapshot.mcq_genius_questions);
++    setTestHistory(snapshot.mcq_genius_history);
++    setQuestionAttempts(snapshot.mcq_genius_attempts);
++    setShareDrafts(snapshot.mcq_genius_share_drafts);
++    setStudyFlags(snapshot.mcq_genius_study_flags);
++    setStudyFlagColors(snapshot.mcq_genius_study_flag_colors);
++    setReviewSchedule(snapshot.mcq_genius_review_schedule);
++    setSuspendedQuestions(snapshot.mcq_genius_suspended);
++    setBuriedQuestions(snapshot.mcq_genius_buried_until);
++    setStorageError('');
++  };
++
+   const handleImportQuestionsFromFile = (
+     importedList: Partial<Question>[],
+     targetCatId: string,
+@@ -619,6 +653,15 @@ export default function App() {
+ 
+       {/* Main Container */}
+       {storageReady && <Suspense fallback={<div role="status" className="p-6 text-center text-sm text-slate-500">Đang mở giao diện...</div>}><main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
++        <CloudSyncPanel
++          visible={activeTab === 'sync'}
++          allowRestore={activeTab === 'sync' || (activeTab === 'home' && !isUploadModalOpen)}
++          capture={captureCloudSnapshot}
++          onRestore={restoreCloudSnapshot}
++          syncChange={syncChange}
++          onOpen={() => setActiveTab('sync')}
++          onBack={() => setActiveTab('home')}
++        />
+         {activeTab === 'home' && (
+           <>
+             {/* Main learning actions */}
+@@ -714,7 +757,10 @@ export default function App() {
+             </div>
+ 
+             {/* Quick Links Row */}
+-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
++            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
++              <button type="button" onClick={() => setActiveTab('sync')} className="group flex min-h-16 items-center justify-between gap-3 rounded-2xl border border-sky-200 bg-white px-5 py-4 text-left shadow-sm transition-all hover:border-sky-400 dark:border-slate-700 dark:bg-slate-800">
++                <span className="flex items-center gap-3"><span className="rounded-xl bg-sky-100 p-2.5 text-sky-700 dark:bg-sky-900/50 dark:text-sky-300"><Cloud className="h-5 w-5" /></span><span><span className="block text-sm font-bold">Đồng bộ dữ liệu</span><span className="text-xs text-slate-500 dark:text-slate-400">Tài khoản &amp; dữ liệu nhiều thiết bị</span></span></span><ChevronRight className="h-5 w-5 text-sky-500" />
++              </button>
+               <button
+                 type="button"
+                 onClick={() => openQuestionList()}
+diff --git a/src/components/CloudSyncPanel.tsx b/src/components/CloudSyncPanel.tsx
+new file mode 100644
+index 0000000..d83d30c
+--- /dev/null
++++ b/src/components/CloudSyncPanel.tsx
+@@ -0,0 +1,208 @@
++import React, { useEffect, useRef, useState } from 'react';
++import type { User } from '@supabase/supabase-js';
++import { ArrowLeft, Cloud, CloudDownload, CloudUpload, LogOut } from 'lucide-react';
++import { downloadSnapshot, getSyncHead, hasPersonalData, snapshotHash, syncClient, syncConfigured, uploadSnapshot, type CloudSnapshot, type SyncHead } from '../services/cloudSync';
++import { getStorageItem, setStorageItem } from '../utils/storage';
++
++interface SyncMeta { revision: string; hash: string }
++interface Props {
++  visible: boolean;
++  syncChange: object;
++  allowRestore: boolean;
++  capture: () => Promise<CloudSnapshot>;
++  onRestore: (snapshot: CloudSnapshot) => Promise<void>;
++  onOpen: () => void;
++  onBack: () => void;
++}
++const button = 'min-h-11 rounded-xl px-4 text-sm font-bold disabled:opacity-50';
++
++export const CloudSyncPanel: React.FC<Props> = ({ visible, syncChange, allowRestore, capture, onRestore, onOpen, onBack }) => {
++  const actions = useRef({ capture, onRestore });
++  actions.current = { capture, onRestore };
++  const localChange = useRef(syncChange);
++  localChange.current = syncChange;
++  const lastSyncedChange = useRef<object | null>(null);
++  const lastSyncedFilters = useRef<string | null>(null);
++  const canRestore = useRef(allowRestore);
++  canRestore.current = allowRestore;
++  const [user, setUser] = useState<User | null>(null);
++  const [email, setEmail] = useState('');
++  const [password, setPassword] = useState('');
++  const [mode, setMode] = useState<'login' | 'register'>('login');
++  const [recovery, setRecovery] = useState(false);
++  const [state, setState] = useState<'loading' | 'ready' | 'conflict'>('loading');
++  const [busy, setBusy] = useState(false);
++  const [message, setMessage] = useState('');
++  const [head, setHead] = useState<SyncHead | null>(null);
++  const [meta, setMeta] = useState<SyncMeta | null>(null);
++  const lock = useRef(false);
++  const userRef = useRef<User | null>(null);
++  userRef.current = user;
++  const metaRef = useRef<SyncMeta | null>(null);
++  metaRef.current = meta;
++  const stateRef = useRef(state);
++  stateRef.current = state;
++  const metaKey = (id: string) => `mcq_genius_cloud_sync_${id}`;
++  const saveMeta = async (id: string, value: SyncMeta) => {
++    await setStorageItem(metaKey(id), value);
++    metaRef.current = value;
++    setMeta(value);
++  };
++  const fail = (error: unknown) => {
++    const detail = error instanceof Error ? error.message : String(error);
++    setMessage(detail === 'SYNC_CONFLICT' ? 'Hai thiết bị cùng sửa dữ liệu. Hãy chọn bản dữ liệu cần giữ.' : `Đồng bộ chưa xong: ${detail}`);
++  };
++  const pull = async (remote: SyncHead, id: string, expectedLocalHash: string) => {
++    setMessage('Đang tải dữ liệu và ảnh về thiết bị...');
++    const snapshot = await downloadSnapshot(remote, id);
++    if (await snapshotHash(await actions.current.capture()) !== expectedLocalHash) {
++      stateRef.current = 'conflict'; setState('conflict');
++      setMessage('Dữ liệu trên máy đã thay đổi trong lúc tải. Hãy chọn bản cần giữ.');
++      return;
++    }
++    if (!canRestore.current) {
++      stateRef.current = 'ready'; setState('ready');
++      setMessage('Đã tải bản mới; sẽ áp dụng khi bạn quay về trang chủ.');
++      return;
++    }
++    await actions.current.onRestore(snapshot);
++    await saveMeta(id, { revision: remote.revision, hash: await snapshotHash(snapshot) });
++    lastSyncedChange.current = null;
++    lastSyncedFilters.current = JSON.stringify(snapshot.mcq_genius_saved_review_filters);
++    setHead(remote);
++    stateRef.current = 'ready'; setState('ready');
++    setMessage('Đã tải dữ liệu xuống thiết bị. Bạn có thể tiếp tục học khi offline.');
++  };
++  const push = async (snapshot: CloudSnapshot, previous: SyncHead | null, id: string) => {
++    const capturedChange = localChange.current;
++    setMessage('Đang nén và tải câu hỏi, ảnh, lịch sử lên đám mây...');
++    const { head: published, hash } = await uploadSnapshot(snapshot, previous?.revision || null, previous);
++    await saveMeta(id, { revision: published.revision, hash });
++    lastSyncedChange.current = capturedChange;
++    lastSyncedFilters.current = JSON.stringify(snapshot.mcq_genius_saved_review_filters);
++    setHead(published);
++    stateRef.current = 'ready'; setState('ready');
++    setMessage('Đã lưu dữ liệu lên tài khoản.');
++  };
++  const reconcile = async (initial = false) => {
++    const account = userRef.current;
++    if (!account || lock.current || !navigator.onLine) {
++      if (!navigator.onLine) setMessage('Đang offline; dữ liệu vẫn được lưu trên máy.');
++      return;
++    }
++    lock.current = true; setBusy(true);
++    try {
++      const saved = initial ? await getStorageItem<SyncMeta | null>(metaKey(account.id), null) : metaRef.current;
++      metaRef.current = saved; setMeta(saved);
++      const remote = await getSyncHead();
++      setHead(remote);
++      if (!initial && saved && remote?.revision === saved.revision && localChange.current === lastSyncedChange.current) {
++        const filters = await getStorageItem<unknown[]>('mcq_genius_saved_review_filters', []);
++        if (JSON.stringify(filters) === lastSyncedFilters.current) {
++          stateRef.current = 'ready'; setState('ready');
++          return;
++        }
++      }
++      const snapshot = await actions.current.capture();
++      const hash = await snapshotHash(snapshot);
++      if (!remote) {
++        if (saved) { stateRef.current = 'conflict'; setState('conflict'); setMessage('Bản đám mây trước đây không còn. Hãy chọn cách xử lý.'); }
++        else await push(snapshot, null, account.id);
++      } else if (saved?.revision === remote.revision) {
++        if (hash !== saved.hash) await push(snapshot, remote, account.id);
++        else { stateRef.current = 'ready'; setState('ready'); if (initial) setMessage('Dữ liệu trên thiết bị đã đồng bộ.'); }
++      } else if ((saved && hash === saved.hash) || (!saved && !hasPersonalData(snapshot))) {
++        if (canRestore.current) await pull(remote, account.id, hash);
++        else { stateRef.current = 'ready'; setState('ready'); setMessage('Có bản mới trên đám mây. Sẽ tải về khi bạn quay lại trang chủ.'); }
++      } else {
++        stateRef.current = 'conflict'; setState('conflict');
++        setMessage('Máy này và tài khoản đều có dữ liệu. Chọn bản bạn muốn dùng; app chưa ghi đè bản nào.');
++      }
++    } catch (error) {
++      fail(error);
++      if (String(error).includes('SYNC_CONFLICT')) { stateRef.current = 'conflict'; setState('conflict'); }
++      else { stateRef.current = 'ready'; setState('ready'); }
++    } finally { lock.current = false; setBusy(false); }
++  };
++  useEffect(() => {
++    if (!syncClient) { setState('ready'); return; }
++    let active = true;
++    void syncClient.auth.getSession().then(({ data }) => { if (active) setUser(data.session?.user || null); });
++    const { data: { subscription } } = syncClient.auth.onAuthStateChange((event, session) => {
++      if (active) { setUser(session?.user || null); if (event === 'PASSWORD_RECOVERY') setRecovery(true); }
++    });
++    return () => { active = false; subscription.unsubscribe(); };
++  }, []);
++  useEffect(() => {
++    if (!user?.id) { setHead(null); setMeta(null); setState('loading'); return; }
++    stateRef.current = 'loading'; setState('loading');
++    void reconcile(true);
++  }, [user?.id]);
++  useEffect(() => {
++    const interval = window.setInterval(() => { if (stateRef.current === 'ready') void reconcile(); }, 60_000);
++    const online = () => { if (stateRef.current === 'ready') void reconcile(); };
++    window.addEventListener('online', online);
++    return () => { window.clearInterval(interval); window.removeEventListener('online', online); };
++  }, []);
++  useEffect(() => {
++    if (stateRef.current !== 'ready') return;
++    const timer = window.setTimeout(() => { void reconcile(); }, 10_000);
++    return () => window.clearTimeout(timer);
++  }, [syncChange]);
++  useEffect(() => { if (allowRestore && stateRef.current === 'ready') void reconcile(); }, [allowRestore]);
++  const authorize = async (event: React.FormEvent) => {
++    event.preventDefault();
++    if (!syncClient) return;
++    setBusy(true); setMessage('');
++    try {
++      const result = mode === 'register'
++        ? await syncClient.auth.signUp({ email: email.trim(), password })
++        : await syncClient.auth.signInWithPassword({ email: email.trim(), password });
++      if (result.error) throw result.error;
++      if (mode === 'register' && !result.data.session) setMessage('Đã gửi email xác nhận. Mở email rồi đăng nhập tại đây.');
++      else setMessage('Đăng nhập thành công. Đang kiểm tra dữ liệu trên đám mây...');
++      setPassword('');
++    } catch (error) { fail(error); }
++    finally { setBusy(false); }
++  };
++  const recoverPassword = async () => {
++    if (!syncClient || !email.trim()) { setMessage('Nhập email tài khoản trước khi yêu cầu đặt lại mật khẩu.'); return; }
++    setBusy(true);
++    const { error } = await syncClient.auth.resetPasswordForEmail(email.trim(), { redirectTo: window.location.origin });
++    if (error) fail(error); else setMessage('Đã gửi email đặt lại mật khẩu. Mở liên kết trong email trên thiết bị này.');
++    setBusy(false);
++  };
++  const updatePassword = async (event: React.FormEvent) => {
++    event.preventDefault();
++    if (!syncClient) return;
++    setBusy(true);
++    const { error } = await syncClient.auth.updateUser({ password });
++    if (error) fail(error); else { setPassword(''); setRecovery(false); setMessage('Đã đổi mật khẩu.'); }
++    setBusy(false);
++  };
++  const resolve = async (decision: 'local' | 'cloud') => {
++    if (!user || lock.current) return;
++    lock.current = true; setBusy(true);
++    try {
++      const remote = await getSyncHead();
++      setHead(remote);
++      if (decision === 'cloud') {
++        if (!remote) throw new Error('Tài khoản chưa có bản đám mây. Hãy chọn lưu dữ liệu máy này.');
++        await pull(remote, user.id, await snapshotHash(await actions.current.capture()));
++      } else {
++        await push(await actions.current.capture(), remote, user.id);
++      }
++    } catch (error) { fail(error); }
++    finally { lock.current = false; setBusy(false); }
++  };
++
++  if (!visible) return state === 'conflict' ? <button type="button" onClick={onOpen} className="w-full rounded-xl border border-amber-400 bg-amber-50 p-3 text-left text-sm font-semibold text-amber-900">Đồng bộ cần bạn chọn dữ liệu trên máy hoặc trên đám mây. Mở Đồng bộ dữ liệu →</button> : null;
++  return <section className="mx-auto max-w-3xl space-y-5 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-800">
++    <div><button type="button" onClick={onBack} className="inline-flex min-h-11 items-center gap-1 text-sm text-indigo-600"><ArrowLeft size={17} /> Trang chủ</button><h1 className="flex items-center gap-2 text-2xl font-bold"><Cloud /> Đồng bộ dữ liệu</h1><p className="mt-2 text-sm text-slate-600 dark:text-slate-300">Dùng cùng một tài khoản trên máy tính và điện thoại. App vẫn lưu bản offline trên từng thiết bị.</p></div>
++    {!syncConfigured && <p role="alert" className="rounded-xl bg-amber-50 p-4 text-sm text-amber-900">Chưa cấu hình VITE_SUPABASE_URL và VITE_SUPABASE_PUBLISHABLE_KEY trên Vercel.</p>}
++    {syncConfigured && !user && <form onSubmit={authorize} className="space-y-3"><div className="flex gap-2"><button type="button" onClick={() => setMode('login')} aria-pressed={mode === 'login'} className={`${button} ${mode === 'login' ? 'bg-indigo-600 text-white' : 'border'}`}>Đăng nhập</button><button type="button" onClick={() => setMode('register')} aria-pressed={mode === 'register'} className={`${button} ${mode === 'register' ? 'bg-indigo-600 text-white' : 'border'}`}>Tạo tài khoản</button></div><label className="block text-sm font-semibold">Email<input type="email" required autoComplete="email" value={email} onChange={event => setEmail(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border px-3 dark:bg-slate-900" /></label><label className="block text-sm font-semibold">Mật khẩu<input type="password" required minLength={6} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={password} onChange={event => setPassword(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border px-3 dark:bg-slate-900" /></label><button disabled={busy} className={`${button} bg-indigo-600 text-white`}>{mode === 'login' ? 'Đăng nhập' : 'Tạo tài khoản'}</button>{mode === 'login' && <button type="button" disabled={busy} onClick={() => void recoverPassword()} className="block min-h-11 text-sm text-indigo-600 underline">Quên mật khẩu?</button>}</form>}
++    {user && recovery && <form onSubmit={updatePassword} className="space-y-2 rounded-xl border border-indigo-300 p-4"><label className="block text-sm font-semibold">Mật khẩu mới<input type="password" required minLength={6} autoComplete="new-password" value={password} onChange={event => setPassword(event.target.value)} className="mt-1 min-h-11 w-full rounded-xl border px-3 dark:bg-slate-900" /></label><button disabled={busy} className={`${button} bg-indigo-600 text-white`}>Lưu mật khẩu mới</button></form>}
++    {user && <div className="space-y-4"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm">Tài khoản: <strong>{user.email}</strong></p><button type="button" disabled={busy} onClick={() => void syncClient?.auth.signOut()} className={`${button} inline-flex items-center gap-2 border`}><LogOut size={16} /> Đăng xuất</button></div><div className="rounded-xl bg-slate-100 p-3 text-sm dark:bg-slate-900">{busy || state === 'loading' ? 'Đang kiểm tra dữ liệu...' : state === 'conflict' ? 'Cần chọn bản dữ liệu' : 'Đã kết nối'}{head && <span className="ml-2 text-xs text-slate-500">Bản đám mây: {new Date(head.updated_at).toLocaleString('vi-VN')}</span>}</div>{state === 'conflict' ? <div className="space-y-3 rounded-xl border border-amber-300 bg-amber-50 p-4 dark:bg-amber-950/30"><p className="text-sm font-semibold">Hai nơi có dữ liệu khác nhau. Chọn một bản để thay thế bản còn lại.</p><div className="flex flex-wrap gap-2"><button type="button" disabled={busy} onClick={() => void resolve('local')} className={`${button} inline-flex items-center gap-2 bg-indigo-600 text-white`}><CloudUpload size={17} /> Giữ bản máy này, tải lên</button><button type="button" disabled={busy || !head} onClick={() => void resolve('cloud')} className={`${button} inline-flex items-center gap-2 border border-amber-500 text-amber-900 dark:text-amber-200`}><CloudDownload size={17} /> Thay bản máy này bằng đám mây</button></div></div> : <button type="button" disabled={busy || state !== 'ready'} onClick={() => void reconcile()} className={`${button} bg-indigo-600 text-white`}>Đồng bộ ngay</button>}<p className="text-xs text-slate-500">Khi có mạng, app tự đồng bộ sau khi bạn thay đổi dữ liệu và kiểm tra thêm mỗi phút. Đăng xuất không xóa dữ liệu offline trên thiết bị này.</p></div>}
++    {message && <p role="status" className="rounded-xl bg-indigo-50 p-3 text-sm text-indigo-900 dark:bg-indigo-950 dark:text-indigo-100">{message}</p>}
++  </section>;
++};
+diff --git a/src/services/cloudSync.ts b/src/services/cloudSync.ts
+new file mode 100644
+index 0000000..0c52d36
+--- /dev/null
++++ b/src/services/cloudSync.ts
+@@ -0,0 +1,133 @@
++import { createClient } from '@supabase/supabase-js';
++import type { Category, Question, QuestionAttempt, ReviewSchedule, SharedExamDraft, StudyFlagColor, TestResult } from '../types/quiz';
++import { INITIAL_CATEGORIES, INITIAL_QUESTIONS } from '../data/defaultQuestions';
++
++const url = import.meta.env.VITE_SUPABASE_URL as string | undefined;
++const key = (import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || import.meta.env.VITE_SUPABASE_ANON_KEY) as string | undefined;
++export const syncConfigured = !!url && !!key;
++export const syncClient = syncConfigured ? createClient(url!, key!, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } }) : null;
++const bucket = 'mcq-private-sync';
++const chunkSize = 4 * 1024 * 1024;
++
++export interface CloudSnapshot {
++  version: 1;
++  mcq_genius_categories: Category[];
++  mcq_genius_questions: Question[];
++  mcq_genius_history: TestResult[];
++  mcq_genius_attempts: QuestionAttempt[];
++  mcq_genius_share_drafts: SharedExamDraft[];
++  mcq_genius_study_flags: Record<string, boolean>;
++  mcq_genius_study_flag_colors: Record<string, StudyFlagColor>;
++  mcq_genius_review_schedule: Record<string, ReviewSchedule>;
++  mcq_genius_suspended: Record<string, boolean>;
++  mcq_genius_buried_until: Record<string, string>;
++  mcq_genius_saved_review_filters: unknown[];
++}
++export interface SyncHead {
++  revision: string;
++  manifest: { paths: string[]; sha256: string; encoding: 'gzip' | 'json'; bytes: number; previousPaths?: string[] };
++  updated_at: string;
++}
++export function hasPersonalData(snapshot: CloudSnapshot): boolean {
++  const defaultQuestions = new Map(INITIAL_QUESTIONS.map(q => [q.id, JSON.stringify(q)]));
++  const defaultCategories = new Map(INITIAL_CATEGORIES.map(c => [c.id, JSON.stringify(c)]));
++  return snapshot.mcq_genius_questions.length !== INITIAL_QUESTIONS.length ||
++    snapshot.mcq_genius_categories.length !== INITIAL_CATEGORIES.length ||
++    snapshot.mcq_genius_questions.some(q => defaultQuestions.get(q.id) !== JSON.stringify(q)) ||
++    snapshot.mcq_genius_categories.some(c => defaultCategories.get(c.id) !== JSON.stringify(c)) ||
++    snapshot.mcq_genius_history.length > 0 || snapshot.mcq_genius_attempts.length > 0 ||
++    Object.keys(snapshot.mcq_genius_study_flags).length > 0 || snapshot.mcq_genius_share_drafts.length > 0 ||
++    Object.keys(snapshot.mcq_genius_review_schedule).length > 0 || snapshot.mcq_genius_saved_review_filters.length > 0 ||
++    Object.keys(snapshot.mcq_genius_suspended).length > 0 || Object.keys(snapshot.mcq_genius_buried_until).length > 0;
++}
++function client() {
++  if (!syncClient) throw new Error('Thiếu cấu hình Supabase trên Vercel.');
++  return syncClient;
++}
++function assertSnapshot(value: unknown): asserts value is CloudSnapshot {
++  if (!value || typeof value !== 'object') throw new Error('Bản sao lưu không hợp lệ.');
++  const data = value as Record<string, unknown>;
++  if (data.version !== 1 || !Array.isArray(data.mcq_genius_questions) ||
++      !Array.isArray(data.mcq_genius_categories) || !Array.isArray(data.mcq_genius_history) ||
++      !Array.isArray(data.mcq_genius_attempts) || !Array.isArray(data.mcq_genius_share_drafts) ||
++      !Array.isArray(data.mcq_genius_saved_review_filters) ||
++      !data.mcq_genius_study_flags || !data.mcq_genius_review_schedule ||
++      data.mcq_genius_questions.some((q: Question) => !q || typeof q.id !== 'string' || !Array.isArray(q.options))) {
++    throw new Error('Bản sao lưu thiếu dữ liệu hoặc bị hỏng.');
++  }
++}
++async function compress(bytes: Uint8Array): Promise<{ bytes: Uint8Array; encoding: 'gzip' | 'json' }> {
++  if (typeof CompressionStream === 'undefined') return { bytes, encoding: 'json' };
++  const zipped = await new Response(new Blob([bytes as BlobPart]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
++  return { bytes: new Uint8Array(zipped), encoding: 'gzip' };
++}
++async function digest(bytes: Uint8Array): Promise<string> {
++  const hash = await crypto.subtle.digest('SHA-256', bytes as BufferSource);
++  return Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, '0')).join('');
++}
++export async function snapshotHash(snapshot: CloudSnapshot): Promise<string> {
++  return digest(new TextEncoder().encode(JSON.stringify(snapshot)));
++}
++export async function getSyncHead(): Promise<SyncHead | null> {
++  const { data: { user } } = await client().auth.getUser();
++  if (!user) throw new Error('Phiên đăng nhập đã hết hạn.');
++  const { data, error } = await client().from('mcq_sync_heads').select('revision,manifest,updated_at').eq('user_id', user.id).maybeSingle();
++  if (error) throw error;
++  return data as SyncHead | null;
++}
++export async function uploadSnapshot(snapshot: CloudSnapshot, expected: string | null, previous?: SyncHead | null): Promise<{ head: SyncHead; hash: string }> {
++  const { data: { user } } = await client().auth.getUser();
++  if (!user) throw new Error('Bạn cần đăng nhập lại.');
++  assertSnapshot(snapshot);
++  const raw = new TextEncoder().encode(JSON.stringify(snapshot));
++  const hash = await digest(raw);
++  const packed = await compress(raw);
++  if (packed.bytes.length > 100 * chunkSize) throw new Error('Bản sao lưu vượt 400 MB. Hãy giảm dung lượng ảnh trước khi đồng bộ.');
++  const revision = crypto.randomUUID();
++  const paths: string[] = [];
++  try {
++    for (let index = 0; index < packed.bytes.length; index += chunkSize) {
++      const path = `${user.id}/${revision}/${paths.length}.bin`;
++      const part = packed.bytes.slice(index, index + chunkSize);
++      const { error } = await client().storage.from(bucket).upload(path, new Blob([part], { type: 'application/octet-stream' }), { upsert: false, contentType: 'application/octet-stream' });
++      if (error) throw error;
++      paths.push(path);
++    }
++    const manifest: SyncHead['manifest'] = { paths, sha256: hash, encoding: packed.encoding, bytes: packed.bytes.length, previousPaths: previous?.manifest.paths };
++    const { data: committed, error } = await client().rpc('mcq_commit_sync', {
++      p_expected: expected, p_revision: revision, p_manifest: manifest,
++    });
++    if (error) throw error;
++    if (!committed) throw new Error('SYNC_CONFLICT');
++    if (previous?.manifest.previousPaths?.length) void client().storage.from(bucket).remove(previous.manifest.previousPaths);
++    return { head: { revision, manifest, updated_at: new Date().toISOString() }, hash };
++  } catch (error) {
++    if (paths.length) void client().storage.from(bucket).remove(paths);
++    throw error;
++  }
++}
++export async function downloadSnapshot(head: SyncHead, userId: string): Promise<CloudSnapshot> {
++  const { paths, sha256, encoding, bytes } = head.manifest;
++  if (!Array.isArray(paths) || !paths.length || paths.length > 100 ||
++      !paths.every(path => typeof path === 'string' && path.startsWith(`${userId}/${head.revision}/`)) ||
++      !Number.isSafeInteger(bytes) || bytes < 1 || bytes > 400 * 1024 * 1024) throw new Error('Danh sách tệp đồng bộ không hợp lệ.');
++  const parts: Uint8Array[] = [];
++  for (const path of paths) {
++    const { data, error } = await client().storage.from(bucket).download(path);
++    if (error || !data) throw error || new Error('Không tải được dữ liệu.');
++    parts.push(new Uint8Array(await data.arrayBuffer()));
++  }
++  const combined = new Uint8Array(parts.reduce((total, part) => total + part.byteLength, 0));
++  if (combined.byteLength !== bytes) throw new Error('Dữ liệu tải về không đầy đủ.');
++  let offset = 0;
++  for (const part of parts) { combined.set(part, offset); offset += part.byteLength; }
++  if (encoding === 'gzip' && typeof DecompressionStream === 'undefined') throw new Error('Trình duyệt không hỗ trợ giải nén. Hãy cập nhật trình duyệt.');
++  if (encoding !== 'gzip' && encoding !== 'json') throw new Error('Định dạng bản sao lưu không hợp lệ.');
++  const raw = encoding === 'gzip'
++    ? new Uint8Array(await new Response(new Blob([combined]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer())
++    : combined;
++  if (await digest(raw) !== sha256) throw new Error('Dữ liệu không khớp mã kiểm tra. Hủy tải về để giữ bản trên máy.');
++  const snapshot: unknown = JSON.parse(new TextDecoder().decode(raw));
++  assertSnapshot(snapshot);
++  return snapshot;
++}
+diff --git a/src/utils/storage.ts b/src/utils/storage.ts
+index 0c3ca54..e489460 100644
+--- a/src/utils/storage.ts
++++ b/src/utils/storage.ts
+@@ -1,4 +1,5 @@
+ import type { Question } from '../types/quiz';
++import type { CloudSnapshot } from '../services/cloudSync';
+ 
+ const DB_NAME = 'mcq_genius_db';
+ const DB_VERSION = 2;
+@@ -93,6 +94,25 @@ export async function setStorageItem<T>(key: string, value: T): Promise<void> {
+   await done;
+ }
+ 
++/** Replace the offline bank and its metadata in one IndexedDB transaction. */
++export async function replaceStoredSnapshot(values: CloudSnapshot): Promise<void> {
++  const db = await openDB();
++  const tx = db.transaction([DATA_STORE, QUESTION_STORE], 'readwrite');
++  const done = complete(tx);
++  const data = tx.objectStore(DATA_STORE);
++  const questions = tx.objectStore(QUESTION_STORE);
++  questions.clear();
++  for (const question of values.mcq_genius_questions) questions.put(question);
++  data.put(values.mcq_genius_questions.map(q => q.id), ORDER_KEY);
++  data.put(true, READY_KEY);
++  data.delete(QUESTIONS_KEY);
++  for (const [key, value] of Object.entries(values)) {
++    if (key !== QUESTIONS_KEY) data.put(value, key);
++  }
++  await done;
++  previousQuestions = new Map(values.mcq_genius_questions.map(q => [q.id, q]));
++}
++
+ /** Imports legacy localStorage once. Never discards old data before the IndexedDB commit. */
+ export async function getStorageItem<T>(key: string, fallbackValue: T): Promise<T> {
+   const db = await openDB();
+diff --git a/src/vite-env.d.ts b/src/vite-env.d.ts
+index 24d8d4b..7ca53b7 100644
+--- a/src/vite-env.d.ts
++++ b/src/vite-env.d.ts
+@@ -1,3 +1,10 @@
+-interface ImportMetaEnv { readonly DEV: boolean; readonly PROD: boolean; readonly MODE: string; }
++interface ImportMetaEnv {
++  readonly DEV: boolean;
++  readonly PROD: boolean;
++  readonly MODE: string;
++  readonly VITE_SUPABASE_URL?: string;
++  readonly VITE_SUPABASE_PUBLISHABLE_KEY?: string;
++  readonly VITE_SUPABASE_ANON_KEY?: string;
++}
+ interface ImportMeta { readonly env: ImportMetaEnv; }
+ declare module '*.css';

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { OptionContent } from './OptionContent';
 import { categoryPath, isFolder } from '../utils/categoryTree';
 import { Category, CategorySelection, Question, TestConfig } from '../types/quiz';
 import { generateQuestionsWithGemini } from '../services/gemini';
@@ -687,7 +688,7 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
                           <span className="w-5 h-5 rounded-md bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 font-bold flex items-center justify-center shrink-0 text-[10px]">
                             {String.fromCharCode(65 + oIdx)}
                           </span>
-                          <span className="flex-1">{opt}</span>
+                          <OptionContent text={opt} images={q.optionImages?.[oIdx]} letter={String.fromCharCode(65 + oIdx)} onZoom={setPreviewZoomImage} />
                         </div>
                       ))}
                     </div>

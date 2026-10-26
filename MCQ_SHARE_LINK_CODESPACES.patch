@@ -1,0 +1,1334 @@
+diff --git a/SUPABASE_SETUP.sql b/SUPABASE_SETUP.sql
+new file mode 100644
+index 0000000..4b4b7dc
+--- /dev/null
++++ b/SUPABASE_SETUP.sql
+@@ -0,0 +1,23 @@
++-- Chạy một lần trong Supabase SQL Editor. Không đưa API key vào SQL này.
++create table if not exists public.mcq_shared_exams (
++  id uuid primary key,
++  title text not null,
++  time_limit_minutes integer not null check (time_limit_minutes between 1 and 360),
++  questions jsonb not null,
++  created_at timestamptz not null default now()
++);
++
++create table if not exists public.mcq_shared_attempts (
++  id uuid primary key,
++  exam_id uuid not null references public.mcq_shared_exams(id) on delete cascade,
++  started_at timestamptz not null default now(),
++  submitted_at timestamptz,
++  correct_count integer,
++  incorrect_count integer,
++  skipped_count integer
++);
++create index if not exists mcq_shared_attempts_exam_idx on public.mcq_shared_attempts(exam_id);
++
++alter table public.mcq_shared_exams enable row level security;
++alter table public.mcq_shared_attempts enable row level security;
++-- Không thêm policy công khai: chỉ Vercel Function với SUPABASE_SECRET_KEY truy cập bảng.
+diff --git a/api/index.ts b/api/index.ts
+index 9c566e4..c2939b6 100644
+--- a/api/index.ts
++++ b/api/index.ts
+@@ -2,6 +2,7 @@ import 'dotenv/config';
+ import dns from 'node:dns';
+ import express, { Request, Response, NextFunction } from 'express';
+ import { GoogleGenAI, Type } from '@google/genai';
++import { shareRouter } from './shareRoutes';
+ 
+ // Ensure IPv4 first to avoid IPv6 hanging on cloud serverless / container environments
+ try {
+@@ -15,6 +16,14 @@ const app = express();
+ // Middleware: Enable JSON payload up to 50MB for exam documents & base64 images
+ app.use(express.json({ limit: '50mb' }));
+ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
++app.use((req: Request, _res: Response, next: NextFunction) => {
++  if (req.path === '/api/index' || req.path === '/api') {
++    if (req.query.share === '1' && typeof req.query.path === 'string' && /^[a-z0-9/-]+$/i.test(req.query.path)) req.url = '/api/share/' + req.query.path;
++    else if (typeof req.query.action === 'string' && ['parse-file', 'categorize', 'generate-questions', 'debate', 'health'].includes(req.query.action)) req.url = '/api/gemini/' + req.query.action;
++  }
++  next();
++});
++app.use('/api/share', shareRouter);
+ 
+ // Middleware: Permissive CORS for Vercel preview environments and custom domains
+ app.use((req: Request, res: Response, next: NextFunction) => {
+@@ -458,7 +467,7 @@ app.use('/api/gemini', geminiRouter);
+ app.use('/gemini', geminiRouter);
+ 
+ // API health check endpoint for Vercel & diagnostics (excluding '/' so frontend SPA is served on root)
+-app.get(['/api', '/api/health', '/health'], (_req: Request, res: Response) => {
++app.get(['/api', '/api/index', '/api/health', '/health'], (_req: Request, res: Response) => {
+   const hasKey = Boolean(process.env.GEMINI_API_KEY);
+   res.json({
+     status: 'ok',
+diff --git a/api/shareRoutes.ts b/api/shareRoutes.ts
+new file mode 100644
+index 0000000..91ce6aa
+--- /dev/null
++++ b/api/shareRoutes.ts
+@@ -0,0 +1,219 @@
++import { randomUUID, timingSafeEqual } from 'node:crypto';
++import express, { type Request, type Response } from 'express';
++import { createClient, type SupabaseClient } from '@supabase/supabase-js';
++
++const router = express.Router();
++const BUCKET = 'mcq-share-images';
++const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
++const MAX_QUESTIONS = 200;
++const MAX_ASSETS = 300;
++
++type ExamQuestion = {
++  id: string;
++  question: string;
++  options: string[];
++  correctAnswer: number;
++  categoryName?: string;
++  images: string[];
++};
++
++type ExamRow = {
++  id: string;
++  title: string;
++  time_limit_minutes: number;
++  questions: ExamQuestion[];
++};
++
++function admin(): SupabaseClient {
++  const url = process.env.SUPABASE_URL;
++  const key = process.env.SUPABASE_SECRET_KEY;
++  if (!url || !key) throw new Error('Thiếu SUPABASE_URL hoặc SUPABASE_SECRET_KEY trên Vercel.');
++  return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
++}
++
++function authorize(req: Request, res: Response): boolean {
++  const expected = process.env.EXAM_PUBLISH_SECRET;
++  const supplied = req.get('x-exam-publish-secret');
++  if (!expected) {
++    res.status(503).json({ error: 'Chưa cấu hình EXAM_PUBLISH_SECRET trên Vercel.' });
++    return false;
++  }
++  const a = Buffer.from(supplied || '');
++  const b = Buffer.from(expected);
++  if (!a.length || a.length !== b.length || !timingSafeEqual(a, b)) {
++    res.status(403).json({ error: 'Mã xuất bản không đúng.' });
++    return false;
++  }
++  return true;
++}
++
++function fail(res: Response, error: unknown): Response {
++  console.error('Shared exam:', error);
++  return res.status(500).json({ error: 'Không thể xử lý đề chia sẻ. Kiểm tra cấu hình Supabase và thử lại.' });
++}
++
++function assertQuestions(value: unknown, examId: string): ExamQuestion[] {
++  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_QUESTIONS) {
++    throw new Error('Số câu hỏi phải từ 1 đến 200.');
++  }
++  let assets = 0;
++  return value.map((item: any, index): ExamQuestion => {
++    const options = item?.options;
++    const images = item?.images || [];
++    if (typeof item?.question !== 'string' || !item.question.trim() || item.question.length > 15000 ||
++        !Array.isArray(options) || options.length < 2 || options.length > 10 ||
++        options.some((option: unknown) => typeof option !== 'string' || option.length > 8000) ||
++        !Number.isInteger(item.correctAnswer) || item.correctAnswer < 0 || item.correctAnswer >= options.length ||
++        !Array.isArray(images) || images.length > 12 ||
++        images.some((image: unknown) => typeof image !== 'string' || !image.startsWith(`mcq-asset://${examId}/`))) {
++      throw new Error(`Câu ${index + 1} thiếu đáp án đúng, có dữ liệu không hợp lệ hoặc ảnh chưa được tải lên.`);
++    }
++    assets += images.length;
++    if (assets > MAX_ASSETS) throw new Error('Đề có quá nhiều ảnh.');
++    return {
++      id: `q-${index + 1}`,
++      question: item.question,
++      options,
++      correctAnswer: item.correctAnswer,
++      categoryName: typeof item.categoryName === 'string' ? item.categoryName.slice(0, 120) : '',
++      images,
++    };
++  });
++}
++
++async function publicQuestions(db: SupabaseClient, exam: ExamRow) {
++  const imageCache = new Map<string, string>();
++  const paths = [...new Set(exam.questions.flatMap(question => question.images.map(url => url.slice('mcq-asset://'.length))))];
++  await Promise.all(paths.map(async path => {
++    if (!path.startsWith(`${exam.id}/`)) throw new Error('Đường dẫn ảnh không hợp lệ.');
++    const { data, error } = await db.storage.from(BUCKET).createSignedUrl(path, 86400);
++    if (error || !data?.signedUrl) throw error || new Error('Không thể mở ảnh.');
++    imageCache.set(path, data.signedUrl);
++  }));
++  return exam.questions.map(({ correctAnswer: _hidden, ...question }) => ({
++    ...question,
++    images: question.images.map(url => imageCache.get(url.slice('mcq-asset://'.length))!),
++  }));
++}
++
++async function getExam(db: SupabaseClient, id: string): Promise<ExamRow | null> {
++  const { data, error } = await db.from('mcq_shared_exams').select('id,title,time_limit_minutes,questions').eq('id', id).maybeSingle();
++  if (error) throw error;
++  return data as ExamRow | null;
++}
++
++// Server checks a private publish passphrase. It is never bundled in browser code.
++router.post('/new', (req, res) => {
++  if (!authorize(req, res)) return;
++  res.json({ id: randomUUID() });
++});
++
++router.post('/image-upload', async (req, res) => {
++  if (!authorize(req, res)) return;
++  const { examId, mime, bytes } = req.body || {};
++  const extensions: Record<string, string> = {
++    'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif',
++  };
++  if (typeof examId !== 'string' || !ID.test(examId) || !extensions[mime] || !Number.isSafeInteger(bytes) || bytes < 1 || bytes > 20_000_000) {
++    return res.status(400).json({ error: 'Ảnh không hợp lệ hoặc lớn hơn 20 MB.' });
++  }
++  try {
++    const path = `${examId}/${randomUUID()}.${extensions[mime]}`;
++    const { data, error } = await admin().storage.from(BUCKET).createSignedUploadUrl(path);
++    if (error || !data?.signedUrl) throw error || new Error('Không tạo được URL tải ảnh.');
++    return res.json({ signedUrl: data.signedUrl, path, imageRef: `mcq-asset://${path}` });
++  } catch (error) { return fail(res, error); }
++});
++
++router.post('/publish', async (req, res) => {
++  if (!authorize(req, res)) return;
++  const { id, title, timeLimitMinutes, questions } = req.body || {};
++  if (typeof id !== 'string' || !ID.test(id) || typeof title !== 'string' || !title.trim() || title.length > 160 ||
++      !Number.isInteger(timeLimitMinutes) || timeLimitMinutes < 1 || timeLimitMinutes > 360) {
++    return res.status(400).json({ error: 'Tên đề hoặc thời gian không hợp lệ (1–360 phút).' });
++  }
++  let normalized: ExamQuestion[];
++  try { normalized = assertQuestions(questions, id); }
++  catch (error) { return res.status(400).json({ error: (error as Error).message }); }
++  try {
++    const { error } = await admin().from('mcq_shared_exams').insert({ id, title: title.trim(), time_limit_minutes: timeLimitMinutes, questions: normalized });
++    if (error) throw error;
++    return res.json({ id, url: `/exam/${id}` });
++  } catch (error) { return fail(res, error); }
++});
++
++router.get('/exam/:id', async (req, res) => {
++  if (!ID.test(req.params.id)) return res.status(404).json({ error: 'Không tìm thấy đề.' });
++  try {
++    const db = admin();
++    const exam = await getExam(db, req.params.id);
++    if (!exam) return res.status(404).json({ error: 'Không tìm thấy đề.' });
++    res.setHeader('Cache-Control', 'no-store');
++    return res.json({ id: exam.id, title: exam.title, timeLimitMinutes: exam.time_limit_minutes, questions: await publicQuestions(db, exam) });
++  } catch (error) { return fail(res, error); }
++});
++
++router.post('/exam/:id/start', async (req, res) => {
++  if (!ID.test(req.params.id)) return res.status(404).json({ error: 'Không tìm thấy đề.' });
++  try {
++    const db = admin();
++    const exam = await getExam(db, req.params.id);
++    if (!exam) return res.status(404).json({ error: 'Không tìm thấy đề.' });
++    const attemptId = randomUUID();
++    const startedAt = new Date();
++    const { error } = await db.from('mcq_shared_attempts').insert({ id: attemptId, exam_id: exam.id, started_at: startedAt.toISOString() });
++    if (error) throw error;
++    return res.json({ attemptId, deadlineAt: new Date(startedAt.getTime() + exam.time_limit_minutes * 60_000).toISOString() });
++  } catch (error) { return fail(res, error); }
++});
++
++router.get('/exam/:id/attempt/:attemptId', async (req, res) => {
++  if (!ID.test(req.params.id) || !ID.test(req.params.attemptId)) return res.status(404).json({ error: 'Không tìm thấy lượt làm bài.' });
++  try {
++    const { data, error } = await admin().from('mcq_shared_attempts').select('started_at,submitted_at,correct_count,incorrect_count,skipped_count').eq('id', req.params.attemptId).eq('exam_id', req.params.id).maybeSingle();
++    if (error) throw error;
++    if (!data) return res.status(404).json({ error: 'Không tìm thấy lượt làm bài.' });
++    const exam = await getExam(admin(), req.params.id);
++    if (!exam) return res.status(404).json({ error: 'Không tìm thấy đề.' });
++    res.setHeader('Cache-Control', 'no-store');
++    return res.json({ deadlineAt: new Date(new Date(data.started_at).getTime() + exam.time_limit_minutes * 60_000).toISOString(),
++      summary: data.submitted_at ? { correct: data.correct_count, incorrect: data.incorrect_count, skipped: data.skipped_count } : null });
++  } catch (error) { return fail(res, error); }
++});
++
++router.post('/exam/:id/submit', async (req, res) => {
++  if (!ID.test(req.params.id)) return res.status(404).json({ error: 'Không tìm thấy đề.' });
++  const { attemptId, answers } = req.body || {};
++  if (typeof attemptId !== 'string' || !ID.test(attemptId) || !answers || typeof answers !== 'object' || Array.isArray(answers)) {
++    return res.status(400).json({ error: 'Bài nộp không hợp lệ.' });
++  }
++  try {
++    const db = admin();
++    const [exam, attemptQuery] = await Promise.all([
++      getExam(db, req.params.id),
++      db.from('mcq_shared_attempts').select('started_at,submitted_at').eq('id', attemptId).eq('exam_id', req.params.id).maybeSingle(),
++    ]);
++    if (attemptQuery.error) throw attemptQuery.error;
++    const attempt = attemptQuery.data;
++    if (!exam || !attempt) return res.status(404).json({ error: 'Không tìm thấy lượt làm bài.' });
++    if (attempt.submitted_at) return res.status(409).json({ error: 'Lượt làm bài này đã được nộp.' });
++    const deadline = new Date(attempt.started_at).getTime() + exam.time_limit_minutes * 60_000;
++    if (Date.now() > deadline + 30000) return res.status(408).json({ error: 'Đã quá thời gian nộp bài. Vui lòng bắt đầu lượt mới.' });
++    let correct = 0, incorrect = 0, skipped = 0;
++    for (const question of exam.questions) {
++      const choice = answers[question.id];
++      if (choice === undefined || choice === null) skipped++;
++      else if (!Number.isInteger(choice) || choice < 0 || choice >= question.options.length) return res.status(400).json({ error: 'Đáp án chọn không hợp lệ.' });
++      else if (choice === question.correctAnswer) correct++;
++      else incorrect++;
++    }
++    const { data, error } = await db.from('mcq_shared_attempts').update({ submitted_at: new Date().toISOString(), correct_count: correct, incorrect_count: incorrect, skipped_count: skipped })
++      .eq('id', attemptId).eq('exam_id', exam.id).is('submitted_at', null).select('id');
++    if (error) throw error;
++    if (!data?.length) return res.status(409).json({ error: 'Lượt làm bài này đã được nộp.' });
++    res.setHeader('Cache-Control', 'no-store');
++    return res.json({ correct, incorrect, skipped, total: exam.questions.length });
++  } catch (error) { return fail(res, error); }
++});
++
++export { router as shareRouter };
+diff --git a/package-lock.json b/package-lock.json
+index 036fa84..9350039 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -9,7 +9,7 @@
+       "version": "0.0.0",
+       "dependencies": {
+         "@google/genai": "^2.4.0",
+-        "@napi-rs/canvas": "^1.0.13",
++        "@supabase/supabase-js": "^2.118.0",
+         "@tailwindcss/vite": "^4.3.3",
+         "@vitejs/plugin-react": "^6.1.1",
+         "canvas-confetti": "^1.9.4",
+@@ -18,7 +18,6 @@
+         "lucide-react": "^0.546.0",
+         "mammoth": "^1.13.0",
+         "motion": "^12.23.24",
+-        "pdf-parse": "^2.4.5",
+         "pdfjs-dist": "6.4.299",
+         "react": "^19.0.1",
+         "react-dom": "^19.0.1",
+@@ -528,6 +527,7 @@
+       "resolved": "https://registry.npmjs.org/@napi-rs/canvas/-/canvas-1.0.13.tgz",
+       "integrity": "sha512-b87ugZpQ5ViwqVBkjervxpwa0GmJPsKHLBNoZN6GpjWeHzTbDUGryriq+2DYW2XbB+xCqSIINQysC0/I87nPbw==",
+       "license": "MIT",
++      "optional": true,
+       "workspaces": [
+         "e2e/*"
+       ],
+@@ -1084,6 +1084,98 @@
+       "integrity": "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==",
+       "license": "MIT"
+     },
++    "node_modules/@supabase/auth-js": {
++      "version": "2.118.0",
++      "resolved": "https://registry.npmjs.org/@supabase/auth-js/-/auth-js-2.118.0.tgz",
++      "integrity": "sha512-xWfPXyhS2KDSfAneMtI6p/tBnbdiz/5vaRKXEqUfzfC9WCniKr2Ds5o5G7RIGig0bom4z6wUY9zaV07WDVTfnQ==",
++      "license": "MIT",
++      "dependencies": {
++        "tslib": "2.8.1"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@supabase/functions-js": {
++      "version": "2.118.0",
++      "resolved": "https://registry.npmjs.org/@supabase/functions-js/-/functions-js-2.118.0.tgz",
++      "integrity": "sha512-4ofletPa/noKAU6KHeqsd3FztGzRPUEJRey1MKY0o+PIHaVePqRPShIXtl37gcVyIWaFM+zNg6r9zh0uUSFOSA==",
++      "license": "MIT",
++      "dependencies": {
++        "tslib": "2.8.1"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@supabase/phoenix": {
++      "version": "0.4.5",
++      "resolved": "https://registry.npmjs.org/@supabase/phoenix/-/phoenix-0.4.5.tgz",
++      "integrity": "sha512-aAn9H9ovVyeApKy11OWOrrOGq8DV68yWeH4ud2lN9fzn4aO8Zb5GLL9m1pUg9nLqIcT+ZDfAcsZe0E/nqdv2lw==",
++      "license": "MIT"
++    },
++    "node_modules/@supabase/postgrest-js": {
++      "version": "2.118.0",
++      "resolved": "https://registry.npmjs.org/@supabase/postgrest-js/-/postgrest-js-2.118.0.tgz",
++      "integrity": "sha512-JXy+37KPApHsyotaQACovv/Jy9E22rfiWLRuT+2UjoEAcAIelDFIrsF/FY47Dy19mO7lI0Tq+zDCX8oJ2Ozfiw==",
++      "license": "MIT",
++      "dependencies": {
++        "tslib": "2.8.1"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@supabase/realtime-js": {
++      "version": "2.118.0",
++      "resolved": "https://registry.npmjs.org/@supabase/realtime-js/-/realtime-js-2.118.0.tgz",
++      "integrity": "sha512-pzCIEWjqD5/xqEZQerpt+q9rsgYkcrkgCJgf0W2ULqC4fYUeB/p9CFa3t9vn+IVh6dMN9r4ZCE262lZvUC+Bfw==",
++      "license": "MIT",
++      "dependencies": {
++        "@supabase/phoenix": "0.4.5",
++        "tslib": "2.8.1"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@supabase/storage-js": {
++      "version": "2.118.0",
++      "resolved": "https://registry.npmjs.org/@supabase/storage-js/-/storage-js-2.118.0.tgz",
++      "integrity": "sha512-5MNkKt2Moy7Jud/sPX7/28BwdDxZMCVHGJT00b8op3KRa9LKSjOAYU5IcfGWIstaasAqY8GkbA6oI3IRDgB1YQ==",
++      "license": "MIT",
++      "dependencies": {
++        "iceberg-js": "^0.8.1",
++        "tslib": "2.8.1"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      }
++    },
++    "node_modules/@supabase/supabase-js": {
++      "version": "2.118.0",
++      "resolved": "https://registry.npmjs.org/@supabase/supabase-js/-/supabase-js-2.118.0.tgz",
++      "integrity": "sha512-FxI8UXMVC2UG7IkeiI8fuQZqq2oI3JeSuN8MPIC2RLVaoEAxKS0nqE6kii9Ewpq8f9gNPM6git1Y8f0vN/QLFw==",
++      "license": "MIT",
++      "dependencies": {
++        "@supabase/auth-js": "2.118.0",
++        "@supabase/functions-js": "2.118.0",
++        "@supabase/postgrest-js": "2.118.0",
++        "@supabase/realtime-js": "2.118.0",
++        "@supabase/storage-js": "2.118.0"
++      },
++      "engines": {
++        "node": ">=22.0.0"
++      },
++      "peerDependencies": {
++        "@opentelemetry/api": ">=1.0.0"
++      },
++      "peerDependenciesMeta": {
++        "@opentelemetry/api": {
++          "optional": true
++        }
++      }
++    },
+     "node_modules/@tailwindcss/node": {
+       "version": "4.3.3",
+       "resolved": "https://registry.npmjs.org/@tailwindcss/node/-/node-4.3.3.tgz",
+@@ -1295,6 +1387,66 @@
+         "node": ">=14.0.0"
+       }
+     },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/core": {
++      "version": "1.11.1",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@emnapi/wasi-threads": "1.2.2",
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/runtime": {
++      "version": "1.11.1",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@emnapi/wasi-threads": {
++      "version": "1.2.2",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@napi-rs/wasm-runtime": {
++      "version": "1.1.4",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "@tybys/wasm-util": "^0.10.1"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/Brooooooklyn"
++      },
++      "peerDependencies": {
++        "@emnapi/core": "^1.7.1",
++        "@emnapi/runtime": "^1.7.1"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/@tybys/wasm-util": {
++      "version": "0.10.2",
++      "inBundle": true,
++      "license": "MIT",
++      "optional": true,
++      "dependencies": {
++        "tslib": "^2.4.0"
++      }
++    },
++    "node_modules/@tailwindcss/oxide-wasm32-wasi/node_modules/tslib": {
++      "version": "2.8.1",
++      "inBundle": true,
++      "license": "0BSD",
++      "optional": true
++    },
+     "node_modules/@tailwindcss/oxide-win32-arm64-msvc": {
+       "version": "4.3.3",
+       "resolved": "https://registry.npmjs.org/@tailwindcss/oxide-win32-arm64-msvc/-/oxide-win32-arm64-msvc-4.3.3.tgz",
+@@ -2840,6 +2992,15 @@
+       "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==",
+       "license": "MIT"
+     },
++    "node_modules/iceberg-js": {
++      "version": "0.8.1",
++      "resolved": "https://registry.npmjs.org/iceberg-js/-/iceberg-js-0.8.1.tgz",
++      "integrity": "sha512-1dhVQZXhcHje7798IVM+xoo/1ZdVfzOMIc8/rgVSijRK38EDqOJoGula9N/8ZI5RD8QTxNQtK/Gozpr+qUqRRA==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=20.0.0"
++      }
++    },
+     "node_modules/iconv-lite": {
+       "version": "0.4.24",
+       "resolved": "https://registry.npmjs.org/iconv-lite/-/iconv-lite-0.4.24.tgz",
+@@ -3500,222 +3661,6 @@
+       "integrity": "sha512-A/AGNMFN3c8bOlvV9RreMdrv7jsmF9XIfDeCd87+I8RNg6s78BhJxMu69NEMHBSJFxKidViTEdruRwEk/WIKqA==",
+       "license": "MIT"
+     },
+-    "node_modules/pdf-parse": {
+-      "version": "2.4.5",
+-      "resolved": "https://registry.npmjs.org/pdf-parse/-/pdf-parse-2.4.5.tgz",
+-      "integrity": "sha512-mHU89HGh7v+4u2ubfnevJ03lmPgQ5WU4CxAVmTSh/sxVTEDYd1er/dKS/A6vg77NX47KTEoihq8jZBLr8Cxuwg==",
+-      "license": "Apache-2.0",
+-      "dependencies": {
+-        "@napi-rs/canvas": "0.1.80",
+-        "pdfjs-dist": "5.4.296"
+-      },
+-      "bin": {
+-        "pdf-parse": "bin/cli.mjs"
+-      },
+-      "engines": {
+-        "node": ">=20.16.0 <21 || >=22.3.0"
+-      },
+-      "funding": {
+-        "type": "github",
+-        "url": "https://github.com/sponsors/mehmet-kozan"
+-      }
+-    },
+-    "node_modules/pdf-parse/node_modules/@napi-rs/canvas": {
+-      "version": "0.1.80",
+-      "resolved": "https://registry.npmjs.org/@napi-rs/canvas/-/canvas-0.1.80.tgz",
+-      "integrity": "sha512-DxuT1ClnIPts1kQx8FBmkk4BQDTfI5kIzywAaMjQSXfNnra5UFU9PwurXrl+Je3bJ6BGsp/zmshVVFbCmyI+ww==",
+-      "license": "MIT",
+-      "workspaces": [
+-        "e2e/*"
+-      ],
+-      "engines": {
+-        "node": ">= 10"
+-      },
+-      "optionalDependencies": {
+-        "@napi-rs/canvas-android-arm64": "0.1.80",
+-        "@napi-rs/canvas-darwin-arm64": "0.1.80",
+-        "@napi-rs/canvas-darwin-x64": "0.1.80",
+-        "@napi-rs/canvas-linux-arm-gnueabihf": "0.1.80",
+-        "@napi-rs/canvas-linux-arm64-gnu": "0.1.80",
+-        "@napi-rs/canvas-linux-arm64-musl": "0.1.80",
+-        "@napi-rs/canvas-linux-riscv64-gnu": "0.1.80",
+-        "@napi-rs/canvas-linux-x64-gnu": "0.1.80",
+-        "@napi-rs/canvas-linux-x64-musl": "0.1.80",
+-        "@napi-rs/canvas-win32-x64-msvc": "0.1.80"
+-      }
+-    },
+-    "node_modules/pdf-parse/node_modules/@napi-rs/canvas-android-arm64": {
+-      "version": "0.1.80",
+-      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-android-arm64/-/canvas-android-arm64-0.1.80.tgz",
+-      "integrity": "sha512-sk7xhN/MoXeuExlggf91pNziBxLPVUqF2CAVnB57KLG/pz7+U5TKG8eXdc3pm0d7Od0WreB6ZKLj37sX9muGOQ==",
+-      "cpu": [
+-        "arm64"
+-      ],
+-      "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "android"
+-      ],
+-      "engines": {
+-        "node": ">= 10"
+-      }
+-    },
+-    "node_modules/pdf-parse/node_modules/@napi-rs/canvas-darwin-arm64": {
+-      "version": "0.1.80",
+-      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-darwin-arm64/-/canvas-darwin-arm64-0.1.80.tgz",
+-      "integrity": "sha512-O64APRTXRUiAz0P8gErkfEr3lipLJgM6pjATwavZ22ebhjYl/SUbpgM0xcWPQBNMP1n29afAC/Us5PX1vg+JNQ==",
+-      "cpu": [
+-        "arm64"
+-      ],
+-      "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "darwin"
+-      ],
+-      "engines": {
+-        "node": ">= 10"
+-      }
+-    },
+-    "node_modules/pdf-parse/node_modules/@napi-rs/canvas-darwin-x64": {
+-      "version": "0.1.80",
+-      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-darwin-x64/-/canvas-darwin-x64-0.1.80.tgz",
+-      "integrity": "sha512-FqqSU7qFce0Cp3pwnTjVkKjjOtxMqRe6lmINxpIZYaZNnVI0H5FtsaraZJ36SiTHNjZlUB69/HhxNDT1Aaa9vA==",
+-      "cpu": [
+-        "x64"
+-      ],
+-      "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "darwin"
+-      ],
+-      "engines": {
+-        "node": ">= 10"
+-      }
+-    },
+-    "node_modules/pdf-parse/node_modules/@napi-rs/canvas-linux-arm-gnueabihf": {
+-      "version": "0.1.80",
+-      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-linux-arm-gnueabihf/-/canvas-linux-arm-gnueabihf-0.1.80.tgz",
+-      "integrity": "sha512-eyWz0ddBDQc7/JbAtY4OtZ5SpK8tR4JsCYEZjCE3dI8pqoWUC8oMwYSBGCYfsx2w47cQgQCgMVRVTFiiO38hHQ==",
+-      "cpu": [
+-        "arm"
+-      ],
+-      "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "linux"
+-      ],
+-      "engines": {
+-        "node": ">= 10"
+-      }
+-    },
+-    "node_modules/pdf-parse/node_modules/@napi-rs/canvas-linux-arm64-gnu": {
+-      "version": "0.1.80",
+-      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-linux-arm64-gnu/-/canvas-linux-arm64-gnu-0.1.80.tgz",
+-      "integrity": "sha512-qwA63t8A86bnxhuA/GwOkK3jvb+XTQaTiVML0vAWoHyoZYTjNs7BzoOONDgTnNtr8/yHrq64XXzUoLqDzU+Uuw==",
+-      "cpu": [
+-        "arm64"
+-      ],
+-      "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "linux"
+-      ],
+-      "engines": {
+-        "node": ">= 10"
+-      }
+-    },
+-    "node_modules/pdf-parse/node_modules/@napi-rs/canvas-linux-arm64-musl": {
+-      "version": "0.1.80",
+-      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-linux-arm64-musl/-/canvas-linux-arm64-musl-0.1.80.tgz",
+-      "integrity": "sha512-1XbCOz/ymhj24lFaIXtWnwv/6eFHXDrjP0jYkc6iHQ9q8oXKzUX1Lc6bu+wuGiLhGh2GS/2JlfORC5ZcXimRcg==",
+-      "cpu": [
+-        "arm64"
+-      ],
+-      "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "linux"
+-      ],
+-      "engines": {
+-        "node": ">= 10"
+-      }
+-    },
+-    "node_modules/pdf-parse/node_modules/@napi-rs/canvas-linux-riscv64-gnu": {
+-      "version": "0.1.80",
+-      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-linux-riscv64-gnu/-/canvas-linux-riscv64-gnu-0.1.80.tgz",
+-      "integrity": "sha512-XTzR125w5ZMs0lJcxRlS1K3P5RaZ9RmUsPtd1uGt+EfDyYMu4c6SEROYsxyatbbu/2+lPe7MPHOO/0a0x7L/gw==",
+-      "cpu": [
+-        "riscv64"
+-      ],
+-      "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "linux"
+-      ],
+-      "engines": {
+-        "node": ">= 10"
+-      }
+-    },
+-    "node_modules/pdf-parse/node_modules/@napi-rs/canvas-linux-x64-gnu": {
+-      "version": "0.1.80",
+-      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-linux-x64-gnu/-/canvas-linux-x64-gnu-0.1.80.tgz",
+-      "integrity": "sha512-BeXAmhKg1kX3UCrJsYbdQd3hIMDH/K6HnP/pG2LuITaXhXBiNdh//TVVVVCBbJzVQaV5gK/4ZOCMrQW9mvuTqA==",
+-      "cpu": [
+-        "x64"
+-      ],
+-      "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "linux"
+-      ],
+-      "engines": {
+-        "node": ">= 10"
+-      }
+-    },
+-    "node_modules/pdf-parse/node_modules/@napi-rs/canvas-linux-x64-musl": {
+-      "version": "0.1.80",
+-      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-linux-x64-musl/-/canvas-linux-x64-musl-0.1.80.tgz",
+-      "integrity": "sha512-x0XvZWdHbkgdgucJsRxprX/4o4sEed7qo9rCQA9ugiS9qE2QvP0RIiEugtZhfLH3cyI+jIRFJHV4Fuz+1BHHMg==",
+-      "cpu": [
+-        "x64"
+-      ],
+-      "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "linux"
+-      ],
+-      "engines": {
+-        "node": ">= 10"
+-      }
+-    },
+-    "node_modules/pdf-parse/node_modules/@napi-rs/canvas-win32-x64-msvc": {
+-      "version": "0.1.80",
+-      "resolved": "https://registry.npmjs.org/@napi-rs/canvas-win32-x64-msvc/-/canvas-win32-x64-msvc-0.1.80.tgz",
+-      "integrity": "sha512-Z8jPsM6df5V8B1HrCHB05+bDiCxjE9QA//3YrkKIdVDEwn5RKaqOxCJDRJkl48cJbylcrJbW4HxZbTte8juuPg==",
+-      "cpu": [
+-        "x64"
+-      ],
+-      "license": "MIT",
+-      "optional": true,
+-      "os": [
+-        "win32"
+-      ],
+-      "engines": {
+-        "node": ">= 10"
+-      }
+-    },
+-    "node_modules/pdf-parse/node_modules/pdfjs-dist": {
+-      "version": "5.4.296",
+-      "resolved": "https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-5.4.296.tgz",
+-      "integrity": "sha512-DlOzet0HO7OEnmUmB6wWGJrrdvbyJKftI1bhMitK7O2N8W2gc757yyYBbINy9IDafXAV9wmKr9t7xsTaNKRG5Q==",
+-      "license": "Apache-2.0",
+-      "engines": {
+-        "node": ">=20.16.0 || >=22.3.0"
+-      },
+-      "optionalDependencies": {
+-        "@napi-rs/canvas": "^0.1.80"
+-      }
+-    },
+     "node_modules/pdfjs-dist": {
+       "version": "6.4.299",
+       "resolved": "https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-6.4.299.tgz",
+diff --git a/package.json b/package.json
+index db3be43..882a951 100644
+--- a/package.json
++++ b/package.json
+@@ -21,11 +21,12 @@
+     "lucide-react": "^0.546.0",
+     "mammoth": "^1.13.0",
+     "motion": "^12.23.24",
+-    "pdfjs-dist": "^6.4.299",
++    "pdfjs-dist": "6.4.299",
+     "react": "^19.0.1",
+     "react-dom": "^19.0.1",
+     "vite": "^8.3.0",
+-    "xlsx": "^0.18.5"
++    "xlsx": "^0.18.5",
++    "@supabase/supabase-js": "^2.118.0"
+   },
+   "devDependencies": {
+     "@types/canvas-confetti": "^1.9.0",
+@@ -34,7 +35,7 @@
+     "@types/react": "^19.3.0",
+     "@types/react-dom": "^19.3.0",
+     "autoprefixer": "^10.4.21",
+-    "esbuild": "^0.25.0",
++    "esbuild": "^0.28.0",
+     "tailwindcss": "^4.3.3",
+     "tsx": "^4.21.0",
+     "typescript": "^7.0.2"
+diff --git a/src/App.tsx b/src/App.tsx
+index 58c3a42..8fe66bd 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -10,6 +10,7 @@ import { CategoryManager } from './components/CategoryManager';
+ import { TestHistoryView, type ReviewFilter } from './components/TestHistoryView';
+ import { GoatCountdownModal } from './components/GoatCountdownModal';
+ import { SharedExamDrafts } from './components/SharedExamDrafts';
++import { publishExam } from './services/share';
+ import {
+   FileUp,
+   PlayCircle,
+@@ -305,6 +306,12 @@ export default function App() {
+     setActiveTab('share-drafts');
+   };
+ 
++  const handlePublishShareDraft = async (draft: SharedExamDraft, secret: string, onProgress: (message: string) => void) => {
++    const url = await publishExam(draft, secret, onProgress);
++    setShareDrafts(prev => prev.map(item => item.id === draft.id ? { ...item, shareUrl: url } : item));
++    return url;
++  };
++
+   const handleDeleteShareDraft = (id: string) => {
+     setShareDrafts((prev) => prev.filter((d) => d.id !== id));
+   };
+@@ -652,6 +659,7 @@ export default function App() {
+               onCreate={() => setActiveTab('create-test')}
+               onPreview={handlePreviewShareDraft}
+               onDelete={handleDeleteShareDraft}
++              onPublish={handlePublishShareDraft}
+             />
+           </>
+         )}
+diff --git a/src/components/PublicExamPage.tsx b/src/components/PublicExamPage.tsx
+new file mode 100644
+index 0000000..3468430
+--- /dev/null
++++ b/src/components/PublicExamPage.tsx
+@@ -0,0 +1,175 @@
++import React, { useCallback, useEffect, useRef, useState } from 'react';
++import { ArrowLeft, ArrowRight, Clock3, Send } from 'lucide-react';
++import { getPublicExam, resumePublicExam, startPublicExam, submitPublicExam, type PublicExam, type PublicSummary } from '../services/share';
++
++export default function PublicExamPage({ examId }: { examId: string }) {
++  const [exam, setExam] = useState<PublicExam | null>(null);
++  const [attemptId, setAttemptId] = useState<string | null>(null);
++  const [deadlineAt, setDeadlineAt] = useState<string | null>(null);
++  const [answers, setAnswers] = useState<Record<string, number | null>>({});
++  const answersRef = useRef<Record<string, number | null>>({});
++  const [index, setIndex] = useState(0);
++  const [secondsLeft, setSecondsLeft] = useState(0);
++  const [summary, setSummary] = useState<PublicSummary | null>(null);
++  const [loading, setLoading] = useState(true);
++  const [busy, setBusy] = useState(false);
++  const [confirmSubmit, setConfirmSubmit] = useState(false);
++  const [error, setError] = useState('');
++  const submitting = useRef(false);
++  const sessionKey = `mcq-public-exam-${examId}`;
++
++  useEffect(() => {
++    let active = true;
++    async function load() {
++      try {
++        const next = await getPublicExam(examId);
++        if (!active) return;
++        setExam(next);
++        const raw = sessionStorage.getItem(sessionKey);
++        if (raw) {
++          const saved = JSON.parse(raw);
++          if (typeof saved?.attemptId === 'string') {
++            const current = await resumePublicExam(examId, saved.attemptId);
++            if (!active) return;
++            setAttemptId(saved.attemptId);
++            setDeadlineAt(current.deadlineAt);
++            if (current.summary) setSummary({ ...current.summary, total: next.questions.length });
++            else if (saved.answers && typeof saved.answers === 'object') {
++              answersRef.current = saved.answers;
++              setAnswers(saved.answers);
++            }
++          }
++        }
++      } catch (cause) {
++        if (active) setError(cause instanceof Error ? cause.message : 'Không thể tải bài thi.');
++      } finally { if (active) setLoading(false); }
++    }
++    void load();
++    return () => { active = false; };
++  }, [examId, sessionKey]);
++
++  const start = async () => {
++    setBusy(true); setError('');
++    try {
++      const result = await startPublicExam(examId);
++      setAttemptId(result.attemptId);
++      setDeadlineAt(result.deadlineAt);
++      setIndex(0);
++      setSummary(null);
++      answersRef.current = {};
++      setAnswers({});
++      sessionStorage.setItem(sessionKey, JSON.stringify({ attemptId: result.attemptId, answers: {} }));
++    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Không thể bắt đầu bài thi.'); }
++    finally { setBusy(false); }
++  };
++
++  const submit = useCallback(async () => {
++    if (!attemptId || submitting.current || summary) return;
++    submitting.current = true;
++    setBusy(true); setError('');
++    try {
++      const result = await submitPublicExam(examId, attemptId, answersRef.current);
++      setSummary(result);
++      sessionStorage.setItem(sessionKey, JSON.stringify({ attemptId, answers: {} }));
++    } catch (cause) {
++      setError(cause instanceof Error ? cause.message : 'Không thể nộp bài. Vui lòng thử lại.');
++    } finally { submitting.current = false; setBusy(false); }
++  }, [attemptId, examId, sessionKey, summary]);
++
++  useEffect(() => {
++    if (!deadlineAt || summary) return;
++    const tick = () => {
++      const remaining = Math.max(0, Math.ceil((new Date(deadlineAt).getTime() - Date.now()) / 1000));
++      setSecondsLeft(remaining);
++      if (remaining === 0 && !submitting.current) void submit();
++    };
++    tick();
++    const timer = window.setInterval(tick, 1000);
++    return () => window.clearInterval(timer);
++  }, [deadlineAt, submit, summary]);
++
++  const choose = (id: string, choice: number) => {
++    if (busy || summary || secondsLeft <= 0 || !attemptId) return;
++    const next = { ...answersRef.current, [id]: choice };
++    answersRef.current = next;
++    setAnswers(next);
++    sessionStorage.setItem(sessionKey, JSON.stringify({ attemptId, answers: next }));
++  };
++
++  const question = exam?.questions[index];
++  const answered = exam ? exam.questions.filter(q => answers[q.id] !== undefined && answers[q.id] !== null).length : 0;
++  return (
++    <div className="min-h-screen bg-slate-100 text-slate-900 pb-28 sm:pb-12">
++      <header className="bg-slate-950 px-4 py-5 text-white">
++        <div className="mx-auto max-w-4xl">
++          <span className="text-xs font-bold uppercase tracking-widest text-indigo-300">Bài thi MCQ</span>
++          <h1 className="mt-1 text-xl font-extrabold break-words">{exam?.title || 'Đang tải bài thi...'}</h1>
++        </div>
++      </header>
++      <main className="mx-auto max-w-4xl space-y-5 px-4 py-6">
++        {error && <div role="alert" className="rounded-xl border border-red-300 bg-red-50 p-4 text-red-800">{error}</div>}
++        {loading && <div role="status" className="rounded-2xl bg-white p-8 text-center">Đang mở đề thi...</div>}
++        {!loading && exam && !attemptId && (
++          <section className="rounded-3xl bg-white p-6 shadow-sm space-y-4">
++            <h2 className="text-xl font-bold">Sẵn sàng làm bài?</h2>
++            <p>{exam.questions.length} câu hỏi · {exam.timeLimitMinutes} phút. Thời gian bắt đầu khi bạn bấm nút bên dưới.</p>
++            <button type="button" disabled={busy} onClick={() => void start()} className="min-h-12 rounded-xl bg-indigo-600 px-6 font-bold text-white disabled:opacity-60">{busy ? 'Đang bắt đầu...' : 'Bắt đầu bài thi'}</button>
++          </section>
++        )}
++        {exam && attemptId && summary && (
++          <section className="rounded-3xl bg-white p-6 shadow-sm sm:p-8">
++            <h2 className="text-2xl font-extrabold">Kết quả bài thi</h2>
++            <p className="mt-2 text-slate-600">Tổng cộng {summary.total} câu · Điểm {Math.round(summary.correct / Math.max(1, summary.total) * 100)}%</p>
++            <div className="mt-6 grid grid-cols-3 gap-3 text-center">
++              <div className="rounded-2xl bg-emerald-50 p-4"><p className="text-sm">Đúng</p><b className="text-3xl text-emerald-700">{summary.correct}</b></div>
++              <div className="rounded-2xl bg-red-50 p-4"><p className="text-sm">Sai</p><b className="text-3xl text-red-700">{summary.incorrect}</b></div>
++              <div className="rounded-2xl bg-amber-50 p-4"><p className="text-sm">Bỏ trống</p><b className="text-3xl text-amber-700">{summary.skipped}</b></div>
++            </div>
++            <p className="mt-5 text-sm text-slate-500">Bài thi này chỉ hiển thị điểm và số câu đúng/sai, không hiển thị đáp án.</p>
++          </section>
++        )}
++        {exam && attemptId && !summary && question && (
++          <>
++            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white px-5 py-3 text-sm font-semibold shadow-sm">
++              <span>Đã trả lời {answered}/{exam.questions.length}</span>
++              <span className="inline-flex items-center gap-2 text-indigo-700"><Clock3 size={18} /> {Math.floor(secondsLeft / 60).toString().padStart(2, '0')}:{(secondsLeft % 60).toString().padStart(2, '0')}</span>
++            </div>
++            <article className="rounded-3xl bg-white p-5 shadow-sm sm:p-8">
++              <p className="text-sm font-bold text-indigo-700">Câu {index + 1}/{exam.questions.length} · {question.categoryName || 'MCQ'}</p>
++              <h2 className="mt-3 whitespace-pre-wrap text-lg font-bold leading-relaxed">{question.question}</h2>
++              {question.images.map((src, i) => <img key={i} src={src} alt={`Hình câu ${index + 1}, ảnh ${i + 1}`} className="mt-4 max-h-[55vh] max-w-full rounded-xl border border-slate-200 object-contain" />)}
++              <div className="mt-5 grid gap-3">
++                {question.options.map((option, i) => (
++                  <button key={i} type="button" disabled={busy || secondsLeft <= 0} onClick={() => choose(question.id, i)}
++                    className={`min-h-12 rounded-xl border-2 px-4 py-3 text-left transition-colors ${answers[question.id] === i ? 'border-indigo-600 bg-indigo-50 text-indigo-900' : 'border-slate-200 hover:border-indigo-300'} disabled:opacity-60`}>
++                    <strong className="mr-3">{String.fromCharCode(65 + i)}.</strong>{option}
++                  </button>
++                ))}
++              </div>
++            </article>
++            <div className="grid grid-cols-5 gap-2 sm:grid-cols-10">
++              {exam.questions.map((q, i) => <button key={q.id} type="button" onClick={() => setIndex(i)} className={`min-h-11 rounded-lg text-sm font-bold ${i === index ? 'bg-indigo-600 text-white' : answers[q.id] !== undefined ? 'bg-indigo-100 text-indigo-800' : 'bg-white text-slate-700'}`} aria-label={`Tới câu ${i + 1}`}>{i + 1}</button>)}
++            </div>
++            <nav className="fixed inset-x-0 bottom-0 z-20 border-t border-slate-200 bg-white p-3 shadow-2xl sm:static sm:rounded-2xl sm:border sm:shadow-sm">
++              <div className="mx-auto flex max-w-4xl items-center justify-between gap-2">
++                <button type="button" onClick={() => setIndex(Math.max(0, index - 1))} disabled={index === 0} className="inline-flex min-h-11 items-center gap-1 rounded-xl px-3 font-semibold disabled:opacity-40"><ArrowLeft size={18} /> Trước</button>
++                <button type="button" disabled={busy} onClick={() => setConfirmSubmit(true)} className="inline-flex min-h-11 items-center gap-1 rounded-xl bg-emerald-600 px-4 font-bold text-white disabled:opacity-60"><Send size={16} /> {busy ? 'Đang nộp' : 'Nộp bài'}</button>
++                <button type="button" onClick={() => setIndex(Math.min(exam.questions.length - 1, index + 1))} disabled={index === exam.questions.length - 1} className="inline-flex min-h-11 items-center gap-1 rounded-xl px-3 font-semibold disabled:opacity-40">Sau <ArrowRight size={18} /></button>
++              </div>
++            </nav>
++          </>
++        )}
++      </main>
++      {confirmSubmit && <div className="fixed inset-0 z-30 flex items-center justify-center bg-slate-950/70 p-4">
++        <div role="dialog" aria-modal="true" aria-labelledby="public-submit-title" className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl">
++          <h2 id="public-submit-title" className="text-lg font-bold">Nộp bài và xem điểm?</h2>
++          <p className="mt-2 text-sm text-slate-600">Bạn đã trả lời {answered}/{exam?.questions.length || 0} câu.</p>
++          <div className="mt-5 flex justify-end gap-2">
++            <button type="button" onClick={() => setConfirmSubmit(false)} className="min-h-11 rounded-xl px-4 font-semibold">Tiếp tục làm</button>
++            <button type="button" onClick={() => { setConfirmSubmit(false); void submit(); }} className="min-h-11 rounded-xl bg-emerald-600 px-4 font-bold text-white">Nộp bài</button>
++          </div>
++        </div>
++      </div>}
++    </div>
++  );
++}
+diff --git a/src/components/SharedExamDrafts.tsx b/src/components/SharedExamDrafts.tsx
+index dbe1e73..b616e2f 100644
+--- a/src/components/SharedExamDrafts.tsx
++++ b/src/components/SharedExamDrafts.tsx
+@@ -1,75 +1,98 @@
+-import React, { useState } from 'react';
+-import { Clock, Eye, FilePlus2, Trash2 } from 'lucide-react';
+-import type { SharedExamDraft } from '../types/quiz';
+-
+-interface Props {
+-  drafts: SharedExamDraft[];
+-  onCreate: () => void;
+-  onPreview: (draft: SharedExamDraft) => void;
+-  onDelete: (id: string) => void;
+-}
+-
+-export const SharedExamDrafts: React.FC<Props> = ({ drafts, onCreate, onPreview, onDelete }) => {
+-  const [pendingDelete, setPendingDelete] = useState<SharedExamDraft | null>(null);
+-
+-  return (
+-    <section className="mx-auto max-w-5xl space-y-5 pb-12">
+-      <div className="flex flex-wrap items-center justify-between gap-4">
+-        <div>
+-          <h1 className="text-2xl font-extrabold text-slate-900 dark:text-white">Bài thi chuẩn bị chia sẻ</h1>
+-          <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
+-            Mỗi bản nháp giữ nguyên câu hỏi, thứ tự đáp án và thời gian từ lúc tạo.
+-          </p>
+-        </div>
+-        <button type="button" onClick={onCreate} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-indigo-600 px-4 text-sm font-bold text-white hover:bg-indigo-500">
+-          <FilePlus2 className="h-4 w-4" /> Tạo đề mới
+-        </button>
+-      </div>
+-
+-      <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100">
+-        Đây là bản nháp lưu trên thiết bị của bạn. Chưa có link để gửi cho người khác. Phần tạo link và chấm điểm an toàn sẽ được kết nối sau khi có máy chủ lưu đề.
+-      </div>
+-
+-      {drafts.length === 0 ? (
+-        <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-10 text-center text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+-          Chưa có bản nháp. Vào Tạo đề MCQ, đặt tên và chọn “Lưu bản đề để chuẩn bị chia sẻ”.
+-        </div>
+-      ) : (
+-        <div className="grid gap-4 md:grid-cols-2">
+-          {drafts.map(draft => (
+-            <article key={draft.id} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-800">
+-              <span className="rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-bold text-amber-900 dark:bg-amber-950 dark:text-amber-200">Bản nháp · Chưa có link</span>
+-              <h2 className="mt-3 break-words text-lg font-bold text-slate-900 dark:text-white">{draft.config.title}</h2>
+-              <p className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+-                <span>{draft.questions.length} câu</span><span>·</span>
+-                <span className="inline-flex items-center gap-1"><Clock className="h-3.5 w-3.5" />{draft.config.timeLimitMinutes > 0 ? `${draft.config.timeLimitMinutes} phút` : 'Không giới hạn thời gian'}</span>
+-                <span>·</span><span>{new Date(draft.createdAt).toLocaleDateString('vi-VN')}</span>
+-              </p>
+-              <div className="mt-5 flex flex-wrap gap-2">
+-                <button type="button" onClick={() => onPreview(draft)} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-indigo-600 px-4 text-xs font-bold text-white hover:bg-indigo-500">
+-                  <Eye className="h-4 w-4" /> Xem thử trang thi
+-                </button>
+-                <button type="button" onClick={() => setPendingDelete(draft)} className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-red-300 px-4 text-xs font-bold text-red-700 dark:border-red-700 dark:text-red-300">
+-                  <Trash2 className="h-4 w-4" /> Xóa bản nháp
+-                </button>
+-              </div>
+-            </article>
+-          ))}
+-        </div>
+-      )}
+-
+-      {pendingDelete && (
+-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setPendingDelete(null); }}>
+-          <div role="dialog" aria-modal="true" aria-labelledby="delete-draft-title" className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl dark:bg-slate-800">
+-            <h2 id="delete-draft-title" className="text-lg font-bold">Xóa bản nháp này?</h2>
+-            <p className="mt-2 break-words text-sm text-slate-600 dark:text-slate-300">{pendingDelete.config.title}</p>
+-            <div className="mt-6 flex justify-end gap-2">
+-              <button type="button" onClick={() => setPendingDelete(null)} className="min-h-11 rounded-xl px-4 text-sm font-semibold">Hủy</button>
+-              <button type="button" onClick={() => { onDelete(pendingDelete.id); setPendingDelete(null); }} className="min-h-11 rounded-xl bg-red-600 px-4 text-sm font-bold text-white">Xác nhận xóa</button>
+-            </div>
+-          </div>
+-        </div>
+-      )}
+-    </section>
+-  );
+-};
++import React, { useState } from 'react';
++import { Clock, Eye, FilePlus2, Trash2, Link2, Copy } from 'lucide-react';
++import type { SharedExamDraft } from '../types/quiz';
++
++interface Props {
++  drafts: SharedExamDraft[];
++  onCreate: () => void;
++  onPreview: (draft: SharedExamDraft) => void;
++  onDelete: (id: string) => void;
++  onPublish: (draft: SharedExamDraft, secret: string, onProgress: (message: string) => void) => Promise<string>;
++}
++
++export const SharedExamDrafts: React.FC<Props> = ({ drafts, onCreate, onPreview, onDelete, onPublish }) => {
++  const [pendingDelete, setPendingDelete] = useState<SharedExamDraft | null>(null);
++  const [secret, setSecret] = useState('');
++  const [busy, setBusy] = useState<string | null>(null);
++  const [progress, setProgress] = useState('');
++  const [error, setError] = useState('');
++  async function publish(draft: SharedExamDraft) {
++    if (!secret.trim()) { setError('Nhập mã xuất bản đã lưu trong Vercel.'); return; }
++    setError(''); setBusy(draft.id); setProgress('Đang chuẩn bị đề...');
++    try { await onPublish(draft, secret, setProgress); }
++    catch (cause) { setError(cause instanceof Error ? cause.message : 'Không thể tạo link.'); }
++    finally { setBusy(null); setProgress(''); }
++  }
++
++
++  return (
++    <section className="mx-auto max-w-5xl space-y-5 pb-12">
++      <div className="flex flex-wrap items-center justify-between gap-4">
++        <div>
++          <h1 className="text-2xl font-extrabold text-slate-900 dark:text-white">Bài thi chuẩn bị chia sẻ</h1>
++          <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
++            Mỗi bản nháp giữ nguyên câu hỏi, thứ tự đáp án và thời gian từ lúc tạo.
++          </p>
++        </div>
++        <button type="button" onClick={onCreate} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-indigo-600 px-4 text-sm font-bold text-white hover:bg-indigo-500">
++          <FilePlus2 className="h-4 w-4" /> Tạo đề mới
++        </button>
++      </div>
++
++      <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100">
++        Bản nháp lưu trên thiết bị. Khi tạo link, đề và ảnh sẽ được lưu trên Supabase để người khác mở được.
++        <label className="mt-3 block font-semibold" htmlFor="publish-secret">Mã xuất bản EXAM_PUBLISH_SECRET</label>
++        <input id="publish-secret" type="password" autoComplete="off" value={secret} onChange={event => setSecret(event.target.value)} placeholder="Mã bạn đã lưu trên Vercel" className="mt-1 block min-h-11 w-full max-w-md rounded-xl border border-amber-400 bg-white px-3 text-slate-900" />
++        {error && <p role="alert" className="mt-2 text-red-700">{error}</p>}
++      </div>
++
++      {drafts.length === 0 ? (
++        <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-10 text-center text-sm text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
++          Chưa có bản nháp. Vào Tạo đề MCQ, đặt tên và chọn “Lưu bản đề để chuẩn bị chia sẻ”.
++        </div>
++      ) : (
++        <div className="grid gap-4 md:grid-cols-2">
++          {drafts.map(draft => (
++            <article key={draft.id} className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-800">
++              <span className="rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-bold text-amber-900 dark:bg-amber-950 dark:text-amber-200">{draft.shareUrl ? 'Đã có link' : 'Bản nháp · Chưa có link'}</span>
++              <h2 className="mt-3 break-words text-lg font-bold text-slate-900 dark:text-white">{draft.config.title}</h2>
++              <p className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
++                <span>{draft.questions.length} câu</span><span>·</span>
++                <span className="inline-flex items-center gap-1"><Clock className="h-3.5 w-3.5" />{draft.config.timeLimitMinutes > 0 ? `${draft.config.timeLimitMinutes} phút` : 'Không giới hạn thời gian'}</span>
++                <span>·</span><span>{new Date(draft.createdAt).toLocaleDateString('vi-VN')}</span>
++              </p>
++              {draft.shareUrl && <div className="mt-4 flex gap-2">
++                <input aria-label="Link bài thi" readOnly onFocus={event => event.target.select()} value={draft.shareUrl} className="min-w-0 flex-1 rounded-xl border border-slate-300 px-3 text-xs" />
++                <button type="button" onClick={() => void navigator.clipboard.writeText(draft.shareUrl!)} className="inline-flex min-h-11 items-center gap-1 rounded-xl bg-emerald-600 px-3 text-xs font-bold text-white"><Copy className="h-4 w-4" /> Sao chép</button>
++              </div>}
++              {busy === draft.id && <p role="status" className="mt-2 text-xs text-indigo-700">{progress}</p>}
++              <div className="mt-5 flex flex-wrap gap-2">
++                {!draft.shareUrl && <button type="button" disabled={!!busy} onClick={() => void publish(draft)} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-xs font-bold text-white disabled:opacity-60"><Link2 className="h-4 w-4" /> Tạo link chia sẻ</button>}
++                {draft.shareUrl && <a href={draft.shareUrl} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-emerald-600 px-4 text-xs font-bold text-white">Mở link</a>}
++                <button type="button" onClick={() => onPreview(draft)} className="inline-flex min-h-11 items-center gap-2 rounded-xl bg-indigo-600 px-4 text-xs font-bold text-white hover:bg-indigo-500">
++                  <Eye className="h-4 w-4" /> Xem thử trang thi
++                </button>
++                <button type="button" onClick={() => setPendingDelete(draft)} className="inline-flex min-h-11 items-center gap-2 rounded-xl border border-red-300 px-4 text-xs font-bold text-red-700 dark:border-red-700 dark:text-red-300">
++                  <Trash2 className="h-4 w-4" /> Xóa bản nháp
++                </button>
++              </div>
++            </article>
++          ))}
++        </div>
++      )}
++
++      {pendingDelete && (
++        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setPendingDelete(null); }}>
++          <div role="dialog" aria-modal="true" aria-labelledby="delete-draft-title" className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl dark:bg-slate-800">
++            <h2 id="delete-draft-title" className="text-lg font-bold">Xóa bản nháp này?</h2>
++            <p className="mt-2 break-words text-sm text-slate-600 dark:text-slate-300">{pendingDelete.config.title}</p>{pendingDelete.shareUrl && <p className="mt-2 text-xs text-amber-700">Xóa bản nháp trên máy không xóa link đã xuất bản.</p>}
++            <div className="mt-6 flex justify-end gap-2">
++              <button type="button" onClick={() => setPendingDelete(null)} className="min-h-11 rounded-xl px-4 text-sm font-semibold">Hủy</button>
++              <button type="button" onClick={() => { onDelete(pendingDelete.id); setPendingDelete(null); }} className="min-h-11 rounded-xl bg-red-600 px-4 text-sm font-bold text-white">Xác nhận xóa</button>
++            </div>
++          </div>
++        </div>
++      )}
++    </section>
++  );
++};
+diff --git a/src/main.tsx b/src/main.tsx
+index c5d9cdc..2e21ceb 100644
+--- a/src/main.tsx
++++ b/src/main.tsx
+@@ -1,8 +1,10 @@
+ import {createRoot} from 'react-dom/client';
+ import App from './App.tsx';
++import PublicExamPage from './components/PublicExamPage.tsx';
+ import './index.css';
+ 
+-createRoot(document.getElementById('root')!).render(<App />);
++const match = window.location.pathname.match(/^\/exam\/([0-9a-f-]{36})\/?$/i);
++createRoot(document.getElementById('root')!).render(match ? <PublicExamPage examId={match[1]} /> : <App />);
+ 
+ if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+   window.addEventListener('load', () => {
+diff --git a/src/services/share.ts b/src/services/share.ts
+new file mode 100644
+index 0000000..3ac9c46
+--- /dev/null
++++ b/src/services/share.ts
+@@ -0,0 +1,88 @@
++import type { SharedExamDraft } from '../types/quiz';
++
++async function jsonRequest<T>(path: string, method: 'GET' | 'POST', body?: unknown, secret?: string): Promise<T> {
++  const response = await fetch(`/api/share${path}`, {
++    method,
++    cache: 'no-store',
++    headers: {
++      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
++      ...(secret ? { 'x-exam-publish-secret': secret } : {}),
++    },
++    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
++  });
++  const data = await response.json().catch(() => ({}));
++  if (!response.ok) throw new Error(data.error || `Không thể kết nối máy chủ (${response.status}).`);
++  return data as T;
++}
++
++export type PublicQuestion = {
++  id: string;
++  question: string;
++  options: string[];
++  categoryName?: string;
++  images: string[];
++};
++export type PublicExam = { id: string; title: string; timeLimitMinutes: number; questions: PublicQuestion[] };
++export type PublicSummary = { correct: number; incorrect: number; skipped: number; total: number };
++
++export const getPublicExam = (id: string) => jsonRequest<PublicExam>(`/exam/${id}`, 'GET');
++export const startPublicExam = (id: string) => jsonRequest<{ attemptId: string; deadlineAt: string }>(`/exam/${id}/start`, 'POST', {});
++export const resumePublicExam = (id: string, attemptId: string) => jsonRequest<{ deadlineAt: string; summary: PublicSummary | null }>(`/exam/${id}/attempt/${attemptId}`, 'GET');
++export const submitPublicExam = (id: string, attemptId: string, answers: Record<string, number | null>) =>
++  jsonRequest<PublicSummary>(`/exam/${id}/submit`, 'POST', { attemptId, answers });
++
++/** Upload images directly to private Storage; serverless requests carry only text metadata. */
++export async function publishExam(draft: SharedExamDraft, secret: string, onProgress: (text: string) => void): Promise<string> {
++  const { id } = await jsonRequest<{ id: string }>('/new', 'POST', {}, secret);
++  const uploaded = new Map<string, string>();
++  const questions = [];
++  const imagesTotal = draft.questions.reduce((total, q) => total + (q.images?.length || (q.imageUrl ? 1 : 0)), 0);
++  let imagesDone = 0;
++
++  for (const question of draft.questions) {
++    const images: string[] = [];
++    for (const source of question.images?.length ? question.images : question.imageUrl ? [question.imageUrl] : []) {
++      if (!uploaded.has(source)) {
++        onProgress(`Đang tải ảnh ${imagesDone + 1}/${imagesTotal}...`);
++        let blob: Blob;
++        try {
++          const response = await fetch(source);
++          if (!response.ok) throw new Error(`HTTP ${response.status}`);
++          blob = await response.blob();
++        } catch {
++          throw new Error('Không thể đọc một ảnh trong đề. Vui lòng tải lại ảnh vào ngân hàng câu hỏi rồi thử lại.');
++        }
++        const mime = blob.type.toLowerCase().split(';')[0];
++        if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(mime)) {
++          throw new Error('Ảnh chia sẻ chỉ hỗ trợ PNG, JPEG, WebP và GIF.');
++        }
++        if (blob.size > 20_000_000) throw new Error('Có ảnh lớn hơn 20 MB.');
++        const ticket = await jsonRequest<{ signedUrl: string; imageRef: string }>(
++          '/image-upload', 'POST', { examId: id, mime, bytes: blob.size }, secret
++        );
++        const form = new FormData();
++        form.append('cacheControl', '3600');
++        form.append('', blob, 'exam-image');
++        const response = await fetch(ticket.signedUrl, { method: 'PUT', body: form });
++        if (!response.ok) throw new Error(`Không tải được ảnh lên kho lưu trữ (${response.status}).`);
++        uploaded.set(source, ticket.imageRef);
++        imagesDone++;
++      }
++      images.push(uploaded.get(source)!);
++    }
++    questions.push({
++      question: question.question,
++      options: question.options,
++      correctAnswer: question.correctAnswer,
++      categoryName: question.categoryName,
++      images,
++    });
++  }
++  onProgress('Đang lưu đề và tạo link...');
++  const payload = { id, title: draft.config.title, timeLimitMinutes: draft.config.timeLimitMinutes, questions };
++  if (new Blob([JSON.stringify(payload)]).size > 3_800_000) {
++    throw new Error('Phần chữ của đề quá lớn để gửi qua Vercel. Hãy chia thành hai đề nhỏ hơn.');
++  }
++  const result = await jsonRequest<{ url: string }>('/publish', 'POST', payload, secret);
++  return new URL(result.url, window.location.origin).toString();
++}
+diff --git a/src/types/quiz.ts b/src/types/quiz.ts
+index 988e0c7..e93843c 100644
+--- a/src/types/quiz.ts
++++ b/src/types/quiz.ts
+@@ -48,12 +48,13 @@ export interface TestConfig {
+   shuffleOptions: boolean;
+ }
+ 
+-/** Bản đề cố định được chuẩn bị trên thiết bị, chưa phải link chia sẻ. */
++/** Bản đề cố định; link công khai chỉ có sau khi xuất bản. */
+ export interface SharedExamDraft {
+   id: string;
+   createdAt: string;
+   config: TestConfig;
+   questions: Question[];
++  shareUrl?: string;
+ }
+ 
+ export interface UserAnswerRecord {
+diff --git a/src/vite-env.d.ts b/src/vite-env.d.ts
+new file mode 100644
+index 0000000..24d8d4b
+--- /dev/null
++++ b/src/vite-env.d.ts
+@@ -0,0 +1,3 @@
++interface ImportMetaEnv { readonly DEV: boolean; readonly PROD: boolean; readonly MODE: string; }
++interface ImportMeta { readonly env: ImportMetaEnv; }
++declare module '*.css';
+diff --git a/tsconfig.json b/tsconfig.json
+index fca2349..21f72ef 100644
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -4,7 +4,6 @@
+     "experimentalDecorators": true,
+     "useDefineForClassFields": false,
+     "module": "ESNext",
+-    "types": ["vite/client"],
+     "lib": [
+       "ES2022",
+       "DOM",
+@@ -24,5 +23,7 @@
+     "allowImportingTsExtensions": true,
+     "noEmit": true
+   },
+-  "exclude": ["dist"]
++  "exclude": [
++    "dist"
++  ]
+ }
+diff --git a/vercel.json b/vercel.json
+index e975f98..4cef803 100644
+--- a/vercel.json
++++ b/vercel.json
+@@ -1,5 +1,7 @@
+ {
++  "$schema": "https://openapi.vercel.sh/vercel.json",
+   "version": 2,
++  "framework": "vite",
+   "buildCommand": "npm run build",
+   "outputDirectory": "dist",
+   "functions": {
+@@ -9,8 +11,16 @@
+   },
+   "rewrites": [
+     {
+-      "source": "/api/(.*)",
+-      "destination": "/api"
++      "source": "/api/share/:path*",
++      "destination": "/api/index?share=1&path=:path*"
++    },
++    {
++      "source": "/api/gemini/:action",
++      "destination": "/api/index?action=:action"
++    },
++    {
++      "source": "/api/health",
++      "destination": "/api/index"
+     },
+     {
+       "source": "/(.*)",

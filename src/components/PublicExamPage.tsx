@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Clock3, Send } from 'lucide-react';
 import { getPublicExam, resumePublicExam, startPublicExam, submitPublicExam, type PublicExam, type PublicSummary } from '../services/share';
+import { OptionContent } from './OptionContent';
 
 export default function PublicExamPage({ examId }: { examId: string }) {
   const [exam, setExam] = useState<PublicExam | null>(null);
@@ -142,7 +143,7 @@ export default function PublicExamPage({ examId }: { examId: string }) {
                 {question.options.map((option, i) => (
                   <button key={i} type="button" disabled={busy || secondsLeft <= 0} onClick={() => choose(question.id, i)}
                     className={`min-h-12 rounded-xl border-2 px-4 py-3 text-left transition-colors ${answers[question.id] === i ? 'border-indigo-600 bg-indigo-50 text-indigo-900' : 'border-slate-200 hover:border-indigo-300'} disabled:opacity-60`}>
-                    <strong className="mr-3">{String.fromCharCode(65 + i)}.</strong>{option}
+                    <strong className="mr-3">{String.fromCharCode(65 + i)}.</strong><OptionContent text={option} images={question.optionImages?.[i]} letter={String.fromCharCode(65 + i)} />
                   </button>
                 ))}
               </div>

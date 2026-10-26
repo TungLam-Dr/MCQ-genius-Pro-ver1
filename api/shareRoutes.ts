@@ -15,6 +15,7 @@ type ExamQuestion = {
   correctAnswer: number;
   categoryName?: string;
   images: string[];
+  optionImages?: string[][];
 };
 
 type ExamRow = {
@@ -60,15 +61,19 @@ function assertQuestions(value: unknown, examId: string): ExamQuestion[] {
   return value.map((item: any, index): ExamQuestion => {
     const options = item?.options;
     const images = item?.images || [];
+    const optionImages = item?.optionImages || [];
     if (typeof item?.question !== 'string' || !item.question.trim() || item.question.length > 15000 ||
         !Array.isArray(options) || options.length < 2 || options.length > 10 ||
         options.some((option: unknown) => typeof option !== 'string' || option.length > 8000) ||
         !Number.isInteger(item.correctAnswer) || item.correctAnswer < 0 || item.correctAnswer >= options.length ||
         !Array.isArray(images) || images.length > 12 ||
-        images.some((image: unknown) => typeof image !== 'string' || !image.startsWith(`mcq-asset://${examId}/`))) {
+        images.some((image: unknown) => typeof image !== 'string' || !image.startsWith(`mcq-asset://${examId}/`)) ||
+        !Array.isArray(optionImages) || optionImages.length > options.length ||
+        optionImages.some((choice: unknown) => !Array.isArray(choice) || choice.length > 12 ||
+          choice.some((image: unknown) => typeof image !== 'string' || !image.startsWith(`mcq-asset://${examId}/`)))) {
       throw new Error(`Câu ${index + 1} thiếu đáp án đúng, có dữ liệu không hợp lệ hoặc ảnh chưa được tải lên.`);
     }
-    assets += images.length;
+    assets += images.length + optionImages.flat().length;
     if (assets > MAX_ASSETS) throw new Error('Đề có quá nhiều ảnh.');
     return {
       id: `q-${index + 1}`,
@@ -77,13 +82,14 @@ function assertQuestions(value: unknown, examId: string): ExamQuestion[] {
       correctAnswer: item.correctAnswer,
       categoryName: typeof item.categoryName === 'string' ? item.categoryName.slice(0, 120) : '',
       images,
+      optionImages,
     };
   });
 }
 
 async function publicQuestions(db: SupabaseClient, exam: ExamRow) {
   const imageCache = new Map<string, string>();
-  const paths = [...new Set(exam.questions.flatMap(question => question.images.map(url => url.slice('mcq-asset://'.length))))];
+  const paths = [...new Set(exam.questions.flatMap(question => [...question.images, ...(question.optionImages || []).flat()].map(url => url.slice('mcq-asset://'.length))))];
   await Promise.all(paths.map(async path => {
     if (!path.startsWith(`${exam.id}/`)) throw new Error('Đường dẫn ảnh không hợp lệ.');
     const { data, error } = await db.storage.from(BUCKET).createSignedUrl(path, 86400);
@@ -93,6 +99,7 @@ async function publicQuestions(db: SupabaseClient, exam: ExamRow) {
   return exam.questions.map(({ correctAnswer: _hidden, ...question }) => ({
     ...question,
     images: question.images.map(url => imageCache.get(url.slice('mcq-asset://'.length))!),
+    optionImages: (question.optionImages || []).map(choice => choice.map(url => imageCache.get(url.slice('mcq-asset://'.length))!)),
   }));
 }
 
