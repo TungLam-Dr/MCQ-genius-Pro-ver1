@@ -102,6 +102,16 @@ export interface QuestionAttempt {
   correct: boolean;
 }
 
+export type ReviewGrade = 'again' | 'hard' | 'good' | 'easy';
+export type StudyFlagColor = 'red' | 'orange' | 'green' | 'blue' | 'pink' | 'teal' | 'purple';
+export interface ReviewSchedule {
+  dueAt: string;
+  lastReviewedAt: string;
+  intervalDays: number;
+  repetitions: number;
+  lastGrade: ReviewGrade;
+}
+
 export type DebateMode =
   | 'initial'
   | 'explain_first'
