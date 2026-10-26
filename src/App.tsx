@@ -1,10 +1,11 @@
-import React, { useState, useEffect, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useMemo, Suspense, lazy } from 'react';
 import { Category, Question, QuestionAttempt, ReviewGrade, ReviewSchedule, SharedExamDraft, StudyFlagColor, TestConfig, TestResult } from './types/quiz';
 import { INITIAL_CATEGORIES, INITIAL_QUESTIONS } from './data/defaultQuestions';
 import { selectQuestionsForBlock, calculateTestResult, isQuestionValid } from './utils/quizEngine';
 import { buildQuestionAttempts } from './utils/analytics';
 import { categorizeQuestionsWithGemini } from './services/gemini';
-import { setStorageItem, getStorageItem } from './utils/storage';
+import { setStorageItem, getStorageItem, replaceStoredSnapshot } from './utils/storage';
+import type { CloudSnapshot } from './services/cloudSync';
 import { scheduleReview } from './utils/reviewScheduler';
 import { Navbar } from './components/Navbar';
 import { CategoryManager } from './components/CategoryManager';
@@ -27,6 +28,7 @@ import {
   AlertTriangle,
   PanelLeft,
   BookOpen,
+  Cloud,
 } from 'lucide-react';
 
 const FileUploadModal = lazy(() => import('./components/FileUploadModal').then(module => ({ default: module.FileUploadModal })));
@@ -37,6 +39,7 @@ const AnalyticsDashboard = lazy(() => import('./components/AnalyticsDashboard').
 const GuestExamPreview = lazy(() => import('./components/GuestExamPreview').then(module => ({ default: module.GuestExamPreview })));
 const QuestionBrowser = lazy(() => import('./components/QuestionBrowser').then(module => ({ default: module.QuestionBrowser })));
 const StudyReview = lazy(() => import('./components/StudyReview').then(module => ({ default: module.StudyReview })));
+const CloudSyncPanel = lazy(() => import('./components/CloudSyncPanel').then(module => ({ default: module.CloudSyncPanel })));
 
 export default function App() {
   const [categories, setCategories] = useState<Category[]>(INITIAL_CATEGORIES);
@@ -55,7 +58,7 @@ export default function App() {
   const [storageError, setStorageError] = useState('');
 
   // The question bank has its own page; the home page stays compact.
-  const [activeTab, setActiveTab] = useState<'home' | 'questions' | 'browser' | 'review' | 'unanswered' | 'history' | 'create-test' | 'runner' | 'result' | 'analyze' | 'share-drafts' | 'share-preview'>('home');
+  const [activeTab, setActiveTab] = useState<'home' | 'questions' | 'browser' | 'review' | 'sync' | 'unanswered' | 'history' | 'create-test' | 'runner' | 'result' | 'analyze' | 'share-drafts' | 'share-preview'>('home');
   const [questionListCategoryId, setQuestionListCategoryId] = useState<string | 'all'>('all');
 
   // Modals & Selection states
@@ -71,6 +74,7 @@ export default function App() {
   const [resultFilter, setResultFilter] = useState<ReviewFilter>('all');
   const [viewingSavedResult, setViewingSavedResult] = useState(false);
   const [resultReturnTab, setResultReturnTab] = useState<'history' | 'analyze'>('history');
+  const syncChange = useMemo(() => ({}), [categories, questions, testHistory, questionAttempts, shareDrafts, studyFlags, studyFlagColors, reviewSchedule, suspendedQuestions, buriedQuestions]);
 
   // Hydrate full data from IndexedDB on initial mount
   useEffect(() => {
@@ -308,6 +312,36 @@ export default function App() {
 
   const handleSetReviewTags = (id: string, tags: string[]) => {
     setQuestions(previous => previous.map(question => question.id === id ? { ...question, tags } : question));
+  };
+
+  const captureCloudSnapshot = async (): Promise<CloudSnapshot> => ({
+    version: 1,
+    mcq_genius_categories: categories,
+    mcq_genius_questions: questions,
+    mcq_genius_history: testHistory,
+    mcq_genius_attempts: questionAttempts,
+    mcq_genius_share_drafts: shareDrafts,
+    mcq_genius_study_flags: studyFlags,
+    mcq_genius_study_flag_colors: studyFlagColors,
+    mcq_genius_review_schedule: reviewSchedule,
+    mcq_genius_suspended: suspendedQuestions,
+    mcq_genius_buried_until: buriedQuestions,
+    mcq_genius_saved_review_filters: await getStorageItem<unknown[]>('mcq_genius_saved_review_filters', []),
+  });
+
+  const restoreCloudSnapshot = async (snapshot: CloudSnapshot) => {
+    await replaceStoredSnapshot(snapshot);
+    setCategories(snapshot.mcq_genius_categories);
+    setQuestions(snapshot.mcq_genius_questions);
+    setTestHistory(snapshot.mcq_genius_history);
+    setQuestionAttempts(snapshot.mcq_genius_attempts);
+    setShareDrafts(snapshot.mcq_genius_share_drafts);
+    setStudyFlags(snapshot.mcq_genius_study_flags);
+    setStudyFlagColors(snapshot.mcq_genius_study_flag_colors);
+    setReviewSchedule(snapshot.mcq_genius_review_schedule);
+    setSuspendedQuestions(snapshot.mcq_genius_suspended);
+    setBuriedQuestions(snapshot.mcq_genius_buried_until);
+    setStorageError('');
   };
 
   const handleImportQuestionsFromFile = (
@@ -619,6 +653,15 @@ export default function App() {
 
       {/* Main Container */}
       {storageReady && <Suspense fallback={<div role="status" className="p-6 text-center text-sm text-slate-500">Đang mở giao diện...</div>}><main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+        <CloudSyncPanel
+          visible={activeTab === 'sync'}
+          allowRestore={activeTab === 'sync' || (activeTab === 'home' && !isUploadModalOpen)}
+          capture={captureCloudSnapshot}
+          onRestore={restoreCloudSnapshot}
+          syncChange={syncChange}
+          onOpen={() => setActiveTab('sync')}
+          onBack={() => setActiveTab('home')}
+        />
         {activeTab === 'home' && (
           <>
             {/* Main learning actions */}
@@ -714,7 +757,10 @@ export default function App() {
             </div>
 
             {/* Quick Links Row */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              <button type="button" onClick={() => setActiveTab('sync')} className="group flex min-h-16 items-center justify-between gap-3 rounded-2xl border border-sky-200 bg-white px-5 py-4 text-left shadow-sm transition-all hover:border-sky-400 dark:border-slate-700 dark:bg-slate-800">
+                <span className="flex items-center gap-3"><span className="rounded-xl bg-sky-100 p-2.5 text-sky-700 dark:bg-sky-900/50 dark:text-sky-300"><Cloud className="h-5 w-5" /></span><span><span className="block text-sm font-bold">Đồng bộ dữ liệu</span><span className="text-xs text-slate-500 dark:text-slate-400">Tài khoản &amp; dữ liệu nhiều thiết bị</span></span></span><ChevronRight className="h-5 w-5 text-sky-500" />
+              </button>
               <button
                 type="button"
                 onClick={() => openQuestionList()}
