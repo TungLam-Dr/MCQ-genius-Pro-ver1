@@ -1,10 +1,11 @@
 import React, { useState, useEffect, Suspense, lazy } from 'react';
-import { Category, Question, QuestionAttempt, SharedExamDraft, TestConfig, TestResult } from './types/quiz';
+import { Category, Question, QuestionAttempt, ReviewGrade, ReviewSchedule, SharedExamDraft, StudyFlagColor, TestConfig, TestResult } from './types/quiz';
 import { INITIAL_CATEGORIES, INITIAL_QUESTIONS } from './data/defaultQuestions';
 import { selectQuestionsForBlock, calculateTestResult, isQuestionValid } from './utils/quizEngine';
 import { buildQuestionAttempts } from './utils/analytics';
 import { categorizeQuestionsWithGemini } from './services/gemini';
 import { setStorageItem, getStorageItem } from './utils/storage';
+import { scheduleReview } from './utils/reviewScheduler';
 import { Navbar } from './components/Navbar';
 import { CategoryManager } from './components/CategoryManager';
 import { TestHistoryView, type ReviewFilter } from './components/TestHistoryView';
@@ -25,6 +26,7 @@ import {
   Trash2,
   AlertTriangle,
   PanelLeft,
+  BookOpen,
 } from 'lucide-react';
 
 const FileUploadModal = lazy(() => import('./components/FileUploadModal').then(module => ({ default: module.FileUploadModal })));
@@ -34,6 +36,7 @@ const TestResultView = lazy(() => import('./components/TestResultView').then(mod
 const AnalyticsDashboard = lazy(() => import('./components/AnalyticsDashboard').then(module => ({ default: module.AnalyticsDashboard })));
 const GuestExamPreview = lazy(() => import('./components/GuestExamPreview').then(module => ({ default: module.GuestExamPreview })));
 const QuestionBrowser = lazy(() => import('./components/QuestionBrowser').then(module => ({ default: module.QuestionBrowser })));
+const StudyReview = lazy(() => import('./components/StudyReview').then(module => ({ default: module.StudyReview })));
 
 export default function App() {
   const [categories, setCategories] = useState<Category[]>(INITIAL_CATEGORIES);
@@ -41,6 +44,10 @@ export default function App() {
   const [testHistory, setTestHistory] = useState<TestResult[]>([]);
   const [questionAttempts, setQuestionAttempts] = useState<QuestionAttempt[]>([]);
   const [studyFlags, setStudyFlags] = useState<Record<string, boolean>>({});
+  const [studyFlagColors, setStudyFlagColors] = useState<Record<string, StudyFlagColor>>({});
+  const [reviewSchedule, setReviewSchedule] = useState<Record<string, ReviewSchedule>>({});
+  const [suspendedQuestions, setSuspendedQuestions] = useState<Record<string, boolean>>({});
+  const [buriedQuestions, setBuriedQuestions] = useState<Record<string, string>>({});
   const [shareDrafts, setShareDrafts] = useState<SharedExamDraft[]>([]);
   const [activeShareDraft, setActiveShareDraft] = useState<SharedExamDraft | null>(null);
   const [pendingDeleteResult, setPendingDeleteResult] = useState<TestResult | null>(null);
@@ -48,7 +55,7 @@ export default function App() {
   const [storageError, setStorageError] = useState('');
 
   // The question bank has its own page; the home page stays compact.
-  const [activeTab, setActiveTab] = useState<'home' | 'questions' | 'browser' | 'unanswered' | 'history' | 'create-test' | 'runner' | 'result' | 'analyze' | 'share-drafts' | 'share-preview'>('home');
+  const [activeTab, setActiveTab] = useState<'home' | 'questions' | 'browser' | 'review' | 'unanswered' | 'history' | 'create-test' | 'runner' | 'result' | 'analyze' | 'share-drafts' | 'share-preview'>('home');
   const [questionListCategoryId, setQuestionListCategoryId] = useState<string | 'all'>('all');
 
   // Modals & Selection states
@@ -70,13 +77,17 @@ export default function App() {
     let isMounted = true;
     async function hydrateFromStorage() {
       try {
-        const [idbCats, idbQuestions, idbHistory, savedAttempts, idbShareDrafts, savedFlags] = await Promise.all([
+        const [idbCats, idbQuestions, idbHistory, savedAttempts, idbShareDrafts, savedFlags, savedColors, savedSchedule, savedSuspended, savedBuried] = await Promise.all([
           getStorageItem<Category[]>('mcq_genius_categories', INITIAL_CATEGORIES),
           getStorageItem<Question[]>('mcq_genius_questions', INITIAL_QUESTIONS),
           getStorageItem<TestResult[]>('mcq_genius_history', []),
           getStorageItem<QuestionAttempt[] | null>('mcq_genius_attempts', null),
           getStorageItem<SharedExamDraft[]>('mcq_genius_share_drafts', []),
           getStorageItem<Record<string, boolean>>('mcq_genius_study_flags', {}),
+          getStorageItem<Record<string, StudyFlagColor>>('mcq_genius_study_flag_colors', {}),
+          getStorageItem<Record<string, ReviewSchedule> | null>('mcq_genius_review_schedule', null),
+          getStorageItem<Record<string, boolean>>('mcq_genius_suspended', {}),
+          getStorageItem<Record<string, string>>('mcq_genius_buried_until', {}),
         ]);
         // Upgrade old saved tests once. Reconcile any test saved just before an interrupted write.
         const recordedSessions = new Set((savedAttempts || []).map(attempt => attempt.sessionId));
@@ -85,6 +96,15 @@ export default function App() {
         if (savedAttempts === null || missingTests.length) {
           await setStorageItem('mcq_genius_attempts', attempts);
         }
+        // Seed the new review calendar once from existing MCQ activity.
+        const schedules: Record<string, ReviewSchedule> = savedSchedule || {};
+        if (savedSchedule === null) {
+          for (const attempt of [...attempts].sort((a, b) => Date.parse(a.endTime) - Date.parse(b.endTime))) {
+            if (!attempt.answered || !Number.isFinite(Date.parse(attempt.endTime))) continue;
+            schedules[attempt.questionId] = scheduleReview(schedules[attempt.questionId], attempt.correct ? 'good' : 'again', new Date(attempt.endTime));
+          }
+          await setStorageItem('mcq_genius_review_schedule', schedules);
+        }
         if (isMounted) {
           setCategories(idbCats);
           setQuestions(idbQuestions);
@@ -92,6 +112,10 @@ export default function App() {
           setQuestionAttempts(attempts);
           setShareDrafts(idbShareDrafts);
           setStudyFlags(savedFlags || {});
+          setStudyFlagColors(savedColors || {});
+          setReviewSchedule(schedules);
+          setSuspendedQuestions(savedSuspended || {});
+          setBuriedQuestions(savedBuried || {});
           setStorageReady(true);
         }
       } catch (err) {
@@ -132,17 +156,58 @@ export default function App() {
     void setStorageItem('mcq_genius_study_flags', studyFlags).catch(() => setStorageError('Không lưu được cờ học tập trên thiết bị.'));
   }, [studyFlags, storageReady]);
 
-  const toggleStudyFlag = (questionId: string) => setStudyFlags((previous) => {
-    const next = { ...previous };
-    if (next[questionId]) delete next[questionId]; else next[questionId] = true;
-    return next;
+  useEffect(() => {
+    if (!storageReady) return;
+    void Promise.all([
+      setStorageItem('mcq_genius_study_flag_colors', studyFlagColors),
+      setStorageItem('mcq_genius_review_schedule', reviewSchedule),
+      setStorageItem('mcq_genius_suspended', suspendedQuestions),
+      setStorageItem('mcq_genius_buried_until', buriedQuestions),
+    ]).catch(() => setStorageError('Không lưu được tiến độ ôn tập trên thiết bị.'));
+  }, [studyFlagColors, reviewSchedule, suspendedQuestions, buriedQuestions, storageReady]);
+
+  const setFlagColor = (id: string, color: StudyFlagColor | null) => {
+    setStudyFlags(previous => { const next = { ...previous }; if (color) next[id] = true; else delete next[id]; return next; });
+    setStudyFlagColors(previous => { const next = { ...previous }; if (color) next[id] = color; else delete next[id]; return next; });
+  };
+
+  const setSuspended = (id: string, suspended: boolean) => setSuspendedQuestions(previous => {
+    const next = { ...previous }; if (suspended) next[id] = true; else delete next[id]; return next;
   });
 
-  const setManyStudyFlags = (ids: string[], flagged: boolean) => setStudyFlags((previous) => {
-    const next = { ...previous };
-    ids.forEach((id) => { if (flagged) next[id] = true; else delete next[id]; });
-    return next;
+  const setBuriedUntil = (id: string, until: string | null) => setBuriedQuestions(previous => {
+    const next = { ...previous }; if (until) next[id] = until; else delete next[id]; return next;
   });
+
+  const gradeReview = (question: Question, grade: ReviewGrade, correct: boolean) => {
+    const now = new Date();
+    setReviewSchedule(previous => ({ ...previous, [question.id]: scheduleReview(previous[question.id], grade, now) }));
+    setQuestionAttempts(previous => [...previous, {
+      sessionId: `review-${now.getTime()}-${Math.random().toString(36).slice(2)}`,
+      questionId: question.id, categoryId: question.categoryId, categoryName: question.categoryName,
+      endTime: now.toISOString(), answered: true, correct,
+    }]);
+  };
+
+  const toggleStudyFlag = (questionId: string) => {
+    if (studyFlags[questionId]) setStudyFlagColors(previous => { const next = { ...previous }; delete next[questionId]; return next; });
+    setStudyFlags((previous) => {
+      const next = { ...previous };
+      if (next[questionId]) delete next[questionId]; else next[questionId] = true;
+      return next;
+    });
+  };
+
+  const setManyStudyFlags = (ids: string[], flagged: boolean) => {
+    if (!flagged) setStudyFlagColors(previous => {
+      const next = { ...previous }; ids.forEach(id => delete next[id]); return next;
+    });
+    setStudyFlags((previous) => {
+      const next = { ...previous };
+      ids.forEach((id) => { if (flagged) next[id] = true; else delete next[id]; });
+      return next;
+    });
+  };
 
   // Handlers for Category & Questions
   const handleAddCategory = (name: string, description: string) => {
@@ -160,6 +225,13 @@ export default function App() {
 
   const handleDeleteCategory = (categoryId: string) => {
     const deletedIds = new Set(questions.filter((question) => question.categoryId === categoryId).map((question) => question.id));
+    const withoutDeleted = <T,>(previous: Record<string, T>) => {
+      const next = { ...previous }; deletedIds.forEach(id => delete next[id]); return next;
+    };
+    setStudyFlagColors(withoutDeleted);
+    setReviewSchedule(withoutDeleted);
+    setSuspendedQuestions(withoutDeleted);
+    setBuriedQuestions(withoutDeleted);
     setStudyFlags((previous) => {
       if (![...deletedIds].some((id) => previous[id])) return previous;
       const next = { ...previous };
@@ -175,6 +247,13 @@ export default function App() {
   };
 
   const handleDeleteQuestion = (questionId: string) => {
+    const withoutQuestion = <T,>(previous: Record<string, T>) => {
+      const next = { ...previous }; delete next[questionId]; return next;
+    };
+    setStudyFlagColors(withoutQuestion);
+    setReviewSchedule(withoutQuestion);
+    setSuspendedQuestions(withoutQuestion);
+    setBuriedQuestions(withoutQuestion);
     setStudyFlags((previous) => {
       if (!previous[questionId]) return previous;
       const next = { ...previous };
@@ -225,6 +304,10 @@ export default function App() {
       manualExplanation: changes.manualExplanation,
       tags: changes.tags,
     } : item));
+  };
+
+  const handleSetReviewTags = (id: string, tags: string[]) => {
+    setQuestions(previous => previous.map(question => question.id === id ? { ...question, tags } : question));
   };
 
   const handleImportQuestionsFromFile = (
@@ -458,6 +541,16 @@ export default function App() {
     setResultReturnTab('history');
     setTestHistory((prev) => [result, ...prev]);
     setQuestionAttempts((prev) => [...prev, ...buildQuestionAttempts([result])]);
+    setReviewSchedule(previous => {
+      const next = { ...previous };
+      const completedAt = new Date(result.endTime);
+      for (const question of result.questions) {
+        const answer = result.userAnswers[question.id];
+        if (answer === null || answer === undefined || !isQuestionValid(question)) continue;
+        next[question.id] = scheduleReview(next[question.id], answer === question.correctAnswer ? 'good' : 'again', completedAt);
+      }
+      return next;
+    });
     setActiveTab('result');
   };
 
@@ -528,8 +621,8 @@ export default function App() {
       {storageReady && <Suspense fallback={<div role="status" className="p-6 text-center text-sm text-slate-500">Đang mở giao diện...</div>}><main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
         {activeTab === 'home' && (
           <>
-            {/* HOME PAGE MAIN 3 ACTION CARDS */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {/* Main learning actions */}
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
               {/* Card 1: Upload File */}
               <div
                 onClick={() => setIsUploadModalOpen(true)}
@@ -580,7 +673,21 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Card 3: Advanced Analyze & Study Diagnostics Hub */}
+              <button
+                type="button"
+                onClick={() => setActiveTab('review')}
+                className="group rounded-3xl p-6 bg-gradient-to-br from-amber-900 via-slate-900 to-orange-950 text-left text-white border border-amber-500/30 hover:border-amber-400 shadow-xl transition-all hover:-translate-y-1 relative overflow-hidden"
+              >
+                <div className="flex items-center justify-between mb-4">
+                  <div className="w-12 h-12 rounded-2xl bg-amber-600/30 border border-amber-500/40 text-amber-200 flex items-center justify-center"><BookOpen className="w-6 h-6" /></div>
+                  <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-200 border border-amber-500/30">CÔNG CỤ 3</span>
+                </div>
+                <h2 className="text-lg font-bold">Ôn tập</h2>
+                <p className="text-xs text-slate-300 mt-2 leading-relaxed">Chọn Block và từng mục để ôn; xem câu đến hạn, gắn cờ, đặt lịch nhắc lại và học từ lời giải gốc.</p>
+                <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between text-xs font-bold text-amber-300"><span>Mở Ôn tập</span><ChevronRight className="w-4 h-4" /></div>
+              </button>
+
+              {/* Advanced Analyze & Study Diagnostics Hub */}
               <div
                 onClick={() => setActiveTab('analyze')}
                 className="group cursor-pointer rounded-3xl p-6 bg-gradient-to-br from-emerald-900 via-slate-900 to-emerald-950 text-white border border-emerald-500/30 hover:border-emerald-400 shadow-xl transition-all transform hover:-translate-y-1 relative overflow-hidden"
@@ -590,7 +697,7 @@ export default function App() {
                     <BarChart3 className="w-6 h-6" />
                   </div>
                   <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                    CÔNG CỤ 3 - ANALYZE
+                    CÔNG CỤ 4 - ANALYZE
                   </span>
                 </div>
                 <h2 className="text-lg font-bold text-white group-hover:text-emerald-200 transition-colors">
@@ -737,6 +844,26 @@ export default function App() {
             onUpdateQuestion={handleUpdateBrowserQuestion}
             onReviewFlagged={handleStartFlaggedReview}
             onOpenBank={() => openQuestionList()}
+            onBack={() => setActiveTab('home')}
+          />
+        )}
+
+        {activeTab === 'review' && (
+          <StudyReview
+            questions={questions}
+            categories={categories}
+            attempts={questionAttempts}
+            flags={studyFlags}
+            flagColors={studyFlagColors}
+            schedules={reviewSchedule}
+            suspended={suspendedQuestions}
+            buriedUntil={buriedQuestions}
+            onFlagColor={setFlagColor}
+            onSuspend={setSuspended}
+            onBury={setBuriedUntil}
+            onGrade={gradeReview}
+            onSetTags={handleSetReviewTags}
+            onEdit={handleUpdateBrowserQuestion}
             onBack={() => setActiveTab('home')}
           />
         )}
