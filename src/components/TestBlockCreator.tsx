@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { OptionContent } from './OptionContent';
+import { CategorySourcePicker } from './CategorySourcePicker';
 import { categoryPath, isFolder } from '../utils/categoryTree';
 import { Category, CategorySelection, Question, TestConfig } from '../types/quiz';
 import { generateQuestionsWithGemini } from '../services/gemini';
@@ -22,6 +23,7 @@ import {
   X,
   FileEdit,
   Share2,
+  ChevronRight,
 } from 'lucide-react';
 
 interface TestBlockCreatorProps {
@@ -52,6 +54,7 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
 
   // Selection Strategy: 'categories' | 'random_mix' | 'ai_generated'
   const [selectionMode, setSelectionMode] = useState<'categories' | 'random_mix' | 'ai_generated'>('categories');
+  const [sourcePickerOpen, setSourcePickerOpen] = useState(false);
 
   // Per category selection setup
   const [categorySelections, setCategorySelections] = useState<Record<string, number>>(() => {
@@ -68,7 +71,7 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
 
   const [selectedCatIds, setSelectedCatIds] = useState<Set<string>>(() => {
     if (preselectedCategoryId) return new Set([preselectedCategoryId]);
-    return new Set(questionCategories.slice(0, 3).map((c) => c.id));
+    return new Set<string>();
   });
 
   // AI Block Generator Prompt
@@ -82,37 +85,30 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
   const [shuffleOptions, setShuffleOptions] = useState(true);
 
   // Question & Image Preview States
-  const [showQuestionPreview, setShowQuestionPreview] = useState(true);
+  const [showQuestionPreview, setShowQuestionPreview] = useState(false);
   const [onlyWithImagesFilter, setOnlyWithImagesFilter] = useState(false);
   const [previewZoomImage, setPreviewZoomImage] = useState<string | null>(null);
 
   // Calculate total questions requested from selected categories
-  const calculatedCategoryQuestions = Array.from(selectedCatIds).reduce(
-    (sum, catId) => sum + (categorySelections[catId] || 0),
+  const availableByCategory = new Map<string, number>();
+  for (const question of allQuestions) if (isQuestionValid(question)) {
+    availableByCategory.set(question.categoryId, (availableByCategory.get(question.categoryId) || 0) + 1);
+  }
+  const calculatedCategoryQuestions = questionCategories.filter(category => selectedCatIds.has(category.id)).reduce(
+    (sum, category) => sum + Math.min(categorySelections[category.id] || 1, availableByCategory.get(category.id) || 0),
     0
   );
+  const questionLimit = presetType === '40q_30m' ? 40 : presetType === '50q_40m' ? 50 : customQuestionCount;
+  const tooManyFromCategories = selectionMode === 'categories' && calculatedCategoryQuestions > questionLimit;
 
   const getEffectiveTotalQuestions = () => {
-    if (presetType === '40q_30m') return 40;
-    if (presetType === '50q_40m') return 50;
-    if (selectionMode === 'categories') return calculatedCategoryQuestions || customQuestionCount;
-    return customQuestionCount;
+    return selectionMode === 'categories' ? Math.min(questionLimit, calculatedCategoryQuestions) : questionLimit;
   };
 
   const getEffectiveTimeLimit = () => {
     if (presetType === '40q_30m') return 30;
     if (presetType === '50q_40m') return 40;
     return customTimeMinutes;
-  };
-
-  const toggleCategorySelect = (catId: string) => {
-    const next = new Set(selectedCatIds);
-    if (next.has(catId)) {
-      next.delete(catId);
-    } else {
-      next.add(catId);
-    }
-    setSelectedCatIds(next);
   };
 
   const buildCurrentConfig = (): TestConfig => {
@@ -124,8 +120,8 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
       .map((c) => ({
         categoryId: c.id,
         categoryName: c.name,
-        availableCount: c.questionCount,
-        requestedCount: categorySelections[c.id] || 0,
+        availableCount: availableByCategory.get(c.id) || 0,
+        requestedCount: Math.min(categorySelections[c.id] || 1, availableByCategory.get(c.id) || 0),
       }));
 
     return {
@@ -141,6 +137,11 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
   };
 
   const handleStart = (action: 'start' | 'share' = 'start') => {
+    if (tooManyFromCategories) return;
+    if (selectionMode === 'categories' && calculatedCategoryQuestions === 0) {
+      setSourcePickerOpen(true);
+      return;
+    }
     const config = buildCurrentConfig();
     const selectedQuestions = selectQuestionsForBlock(allQuestions, config);
 
@@ -388,82 +389,14 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
           </div>
         </div>
 
-        {/* Mode A: Select Specific Categories and specified question counts per category */}
+        {/* Selected sources stay compact even when the bank contains hundreds of folders. */}
         {selectionMode === 'categories' && (
-          <div className="space-y-4">
-            <p className="text-xs text-slate-600 dark:text-slate-400">
-              Đánh dấu chọn các Mục cần đưa vào bài thi, sau đó điều chỉnh số câu muốn lấy ngẫu nhiên từ từng mục đó:
-            </p>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {questionCategories.map((cat) => {
-                const isChecked = selectedCatIds.has(cat.id);
-                const currentCount = categorySelections[cat.id] ?? 5;
-                const catValidCount = allQuestions.filter((q) => q.categoryId === cat.id && isQuestionValid(q)).length;
-                const catImagesCount = allQuestions.filter((q) => q.categoryId === cat.id && (!!q.imageUrl || (q.images && q.images.length > 0))).length;
-
-                return (
-                  <div
-                    key={cat.id}
-                    className={`p-4 rounded-2xl border transition-all flex items-center justify-between gap-3 ${
-                      isChecked
-                        ? 'bg-indigo-50/70 dark:bg-slate-900 border-indigo-400 dark:border-indigo-600'
-                        : 'bg-slate-50/50 dark:bg-slate-900/40 border-slate-200 dark:border-slate-800'
-                    }`}
-                  >
-                    <div className="flex items-center space-x-3 flex-1 min-w-0">
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        onChange={() => toggleCategorySelect(cat.id)}
-                        className="w-4 h-4 text-indigo-600 rounded focus:ring-indigo-500 cursor-pointer"
-                      />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center space-x-1.5">
-                          <p className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">{categoryPath(categories, cat.id)}</p>
-                          {catImagesCount > 0 && (
-                            <span className="text-[10px] px-1.5 py-0.2 rounded bg-indigo-100 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-bold shrink-0 flex items-center space-x-0.5">
-                              <ImageIcon className="w-2.5 h-2.5" />
-                              <span>{catImagesCount} ảnh</span>
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                          Khả dụng: <strong className="text-emerald-600 dark:text-emerald-400">{catValidCount}</strong>/{cat.questionCount} câu
-                        </p>
-                      </div>
-                    </div>
-
-                    {isChecked && (
-                      <div className="flex items-center space-x-1.5 shrink-0">
-                        <span className="text-[11px] text-slate-500 font-medium">Lấy random:</span>
-                        <input
-                          type="number"
-                          min={1}
-                          max={catValidCount || 1}
-                          value={Math.min(currentCount, catValidCount || 1)}
-                          onChange={(e) => {
-                            const val = Math.max(1, Math.min(catValidCount || 1, parseInt(e.target.value) || 1));
-                            setCategorySelections((prev: Record<string, number>) => ({ ...prev, [cat.id]: val }));
-                          }}
-                          className="w-16 px-2 py-1 text-xs font-bold bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded-lg text-indigo-600 dark:text-indigo-400 text-center"
-                        />
-                        <span className="text-xs text-slate-500">câu</span>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="p-3 bg-indigo-50 dark:bg-indigo-950/40 rounded-xl border border-indigo-200 dark:border-indigo-800 text-xs text-indigo-900 dark:text-indigo-200 flex items-center justify-between">
-              <span>
-                Tổng số câu đã chỉ định từ {selectedCatIds.size} mục: <strong>{calculatedCategoryQuestions} câu</strong>
-              </span>
-              <span className="text-[11px] text-indigo-600 dark:text-indigo-300 italic">
-                (Đề thi sẽ tạo thành block riêng từ nguồn này)
-              </span>
-            </div>
+          <div className="space-y-3">
+            <button type="button" onClick={() => setSourcePickerOpen(true)} className="flex min-h-14 w-full items-center justify-between gap-3 rounded-2xl border border-indigo-200 bg-indigo-50 px-4 text-left hover:border-indigo-500 dark:border-indigo-800 dark:bg-indigo-950/40">
+              <span className="flex min-w-0 items-center gap-3"><FolderTree className="shrink-0 text-indigo-600" size={21} /><span><strong className="block text-sm text-slate-900 dark:text-white">Chọn mục câu hỏi</strong><span className="block text-xs text-slate-500 dark:text-slate-300">Mở cây mục lớn, mục nhỏ và tìm kiếm</span></span></span>
+              <span className="flex shrink-0 items-center gap-1 text-xs font-bold text-indigo-700 dark:text-indigo-300">{selectedCatIds.size} mục <ChevronRight size={17} /></span>
+            </button>
+            {selectedCatIds.size > 0 ? <div className="rounded-xl border border-slate-200 p-3 text-xs dark:border-slate-700"><div className="flex flex-wrap gap-2">{questionCategories.filter(category => selectedCatIds.has(category.id)).slice(0, 4).map(category => <span key={category.id} title={categoryPath(categories, category.id)} className="max-w-full truncate rounded-lg bg-slate-100 px-2 py-1 dark:bg-slate-700">{categoryPath(categories, category.id)} · {Math.min(categorySelections[category.id] || 1, availableByCategory.get(category.id) || 0)} câu</span>)}{selectedCatIds.size > 4 && <span className="px-2 py-1">+{selectedCatIds.size - 4} mục khác</span>}</div><p className="mt-2 text-indigo-700 dark:text-indigo-300">Nguồn đã chọn: {calculatedCategoryQuestions} câu khả dụng. Đề hiện lấy {getEffectiveTotalQuestions()} câu.</p>{tooManyFromCategories && <p role="alert" className="mt-2 font-semibold text-amber-700 dark:text-amber-300">Đang chọn {calculatedCategoryQuestions} câu, vượt mức {questionLimit} câu. Hãy giảm số câu trong các mục hoặc chọn đề tùy chỉnh.</p>}</div> : <p className="text-xs text-amber-700 dark:text-amber-300">Chưa chọn mục. Bấm “Chọn mục câu hỏi” để chọn nguồn cho đề thi.</p>}
           </div>
         )}
 
@@ -747,7 +680,8 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
             <button
               onClick={() => handleStart('share')}
               type="button"
-              className="px-5 py-3.5 rounded-2xl border border-amber-400/40 hover:border-amber-400 text-amber-200 text-xs font-bold flex items-center justify-center space-x-2 transition-all hover:bg-amber-950/40"
+              disabled={tooManyFromCategories}
+              className="px-5 py-3.5 rounded-2xl border border-amber-400/40 hover:border-amber-400 text-amber-200 text-xs font-bold flex items-center justify-center space-x-2 transition-all hover:bg-amber-950/40 disabled:opacity-40"
             >
               <Share2 className="w-4 h-4 text-amber-400" />
               <span>Lưu bản đề để chuẩn bị chia sẻ</span>
@@ -756,7 +690,8 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
             <button
               onClick={() => handleStart('start')}
               type="button"
-              className="px-8 py-3.5 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white text-sm font-bold rounded-2xl shadow-xl shadow-indigo-600/30 flex items-center justify-center space-x-2 transition-all transform hover:scale-105 active:scale-95"
+              disabled={tooManyFromCategories}
+              className="px-8 py-3.5 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-purple-500 text-white text-sm font-bold rounded-2xl shadow-xl shadow-indigo-600/30 flex items-center justify-center space-x-2 transition-all transform hover:scale-105 active:scale-95 disabled:opacity-40"
             >
               <Play className="w-5 h-5 fill-current" />
               <span>VÀO LÀM BÀI THI MCQ NGAY</span>
@@ -764,6 +699,16 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
           </div>
         </div>
       </div>
+
+      {sourcePickerOpen && <CategorySourcePicker
+        categories={categories}
+        questions={allQuestions}
+        selectedIds={selectedCatIds}
+        counts={categorySelections}
+        onSelect={setSelectedCatIds}
+        onCount={(id, count) => setCategorySelections(previous => ({ ...previous, [id]: count }))}
+        onClose={() => setSourcePickerOpen(false)}
+      />}
 
       {/* Lightbox Zoom Modal for Images */}
       {previewZoomImage && (
