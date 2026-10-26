@@ -1,5 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Category, Question, QuestionAttempt } from '../types/quiz';
+import { CategoryTree } from './CategoryTree';
+import { categoryPath, isFolder, subtreeIds } from '../utils/categoryTree';
 import {
   FolderPlus,
   Search,
@@ -31,7 +33,10 @@ interface CategoryManagerProps {
   questionAttempts?: QuestionAttempt[];
   studyFlags?: Record<string, boolean>;
   onToggleStudyFlag?: (questionId: string) => void;
-  onAddCategory: (categoryName: string, description: string) => void;
+  onAddCategory: (categoryName: string, description: string, parentId?: string | null) => void;
+  onCreateFolder: (name: string, description: string, parentId: string | null) => void;
+  onUpdateCategory: (id: string, name: string, description: string, parentId: string | null) => void;
+  onDeleteFolder: (id: string) => void;
   onDeleteCategory: (categoryId: string) => void;
   onDeleteQuestion: (questionId: string) => void;
   onAddQuestion: (question: Partial<Question>) => void;
@@ -67,6 +72,9 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
   studyFlags = {},
   onToggleStudyFlag,
   onAddCategory,
+  onCreateFolder,
+  onUpdateCategory,
+  onDeleteFolder,
   onDeleteCategory,
   onDeleteQuestion,
   onAddQuestion,
@@ -89,6 +97,7 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
   const [showAddCatModal, setShowAddCatModal] = useState(false);
   const [newCatName, setNewCatName] = useState('');
   const [newCatDesc, setNewCatDesc] = useState('');
+  const [newCatParentId, setNewCatParentId] = useState<string | null>(null);
 
   // Confirmation modal state for fast category deletion
   const [catToDelete, setCatToDelete] = useState<Category | null>(null);
@@ -99,7 +108,7 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
   const [newQOptions, setNewQOptions] = useState(['', '', '', '']);
   const [newQCorrect, setNewQCorrect] = useState(0);
   const [newQExpl, setNewQExpl] = useState('');
-  const [newQCatId, setNewQCatId] = useState(categories[0]?.id || '');
+  const [newQCatId, setNewQCatId] = useState(categories.find(category => !isFolder(category))?.id || '');
   const [newQImageUrl, setNewQImageUrl] = useState('');
   const [previewZoomImage, setPreviewZoomImage] = useState<string | null>(null);
   const [editingQuestion, setEditingQuestion] = useState<Question | null>(null);
@@ -119,8 +128,11 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
     return stats;
   }, [questionAttempts]);
 
+  const leafCategories = useMemo(() => categories.filter(category => !isFolder(category)), [categories]);
+  const selectedIds = useMemo(() => selectedCategoryId === 'all' ? null : subtreeIds(categories, selectedCategoryId), [categories, selectedCategoryId]);
+
   const bankCounts = useMemo(() => {
-    const scoped = selectedCategoryId === 'all' ? questions : questions.filter((question) => question.categoryId === selectedCategoryId);
+    const scoped = selectedIds ? questions.filter(question => selectedIds.has(question.categoryId)) : questions;
     return {
       all: scoped.length,
       unanswered: scoped.filter(needsAnswer).length,
@@ -129,12 +141,12 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
       mistaken: scoped.filter((question) => (practiceStats.get(question.id)?.incorrect || 0) > 0).length,
       flagged: scoped.filter((question) => !!studyFlags[question.id]).length,
     };
-  }, [questions, practiceStats, selectedCategoryId, studyFlags]);
+  }, [questions, practiceStats, selectedIds, studyFlags]);
 
   // Search and practice filters share the same question bank.
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const filteredQuestions = questions.filter((q) => {
-    const matchCat = selectedCategoryId === 'all' || q.categoryId === selectedCategoryId;
+    const matchCat = !selectedIds || selectedIds.has(q.categoryId);
     const matchSearch =
       q.question.toLowerCase().includes(normalizedSearch) ||
       q.options.some((opt) => opt.toLowerCase().includes(normalizedSearch)) ||
@@ -182,9 +194,10 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
   const handleCreateCategory = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCatName.trim()) return;
-    onAddCategory(newCatName.trim(), newCatDesc.trim());
+    onAddCategory(newCatName.trim(), newCatDesc.trim(), newCatParentId);
     setNewCatName('');
     setNewCatDesc('');
+    setNewCatParentId(null);
     setShowAddCatModal(false);
   };
 
@@ -201,7 +214,8 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
     e.preventDefault();
     if (!newQText.trim() || newQOptions.some((o) => !o.trim())) return;
 
-    const targetCat = categories.find((c) => c.id === newQCatId) || categories[0];
+    const targetCat = leafCategories.find((c) => c.id === newQCatId) || leafCategories[0];
+    if (!targetCat) return;
 
     onAddQuestion({
       question: newQText.trim(),
@@ -226,13 +240,14 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
 
   return (
     <div className="space-y-8">
+      {view === 'questions' && !unansweredOnly && <CategoryTree categories={categories} questions={questions} selectedId={selectedCategoryId} onSelect={id => { setSelectedCategoryId(id); setPage(1); }} onCreateFolder={onCreateFolder} onUpdateCategory={onUpdateCategory} onDeleteFolder={onDeleteFolder} onCreateQuestionCategory={() => setShowAddCatModal(true)} />}
       {/* Category Cards Grid: visible when view !== 'questions' */}
       {view !== 'questions' && (
         <div>
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-lg font-bold text-slate-800 dark:text-slate-100 flex items-center space-x-2">
               <FolderTree className="w-5 h-5 text-indigo-500" />
-              <span>Danh Sách Các Mục Đã Lưu ({categories.length})</span>
+              <span>Danh Sách Các Mục Đã Lưu ({leafCategories.length})</span>
             </h2>
 
             <button
@@ -283,7 +298,7 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
             </div>
 
             {/* Individual Category Cards with PROMINENT Delete Icon Button */}
-            {categories.map((cat) => {
+            {leafCategories.map((cat) => {
               const IconComponent = (cat.icon && ICON_MAP[cat.icon]) || FolderTree;
               const catQuestionsCount = questions.filter((q) => q.categoryId === cat.id).length;
               const isSelected = selectedCategoryId === cat.id;
@@ -380,7 +395,7 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
               <span>Tất Cả</span>
               <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-black/10 dark:bg-white/10">{visibleQuestionCount}</span>
             </button>
-            {categories.map((cat) => {
+            {leafCategories.map((cat) => {
               const count = questions.filter((q) => q.categoryId === cat.id && (!unansweredOnly || needsAnswer(q))).length;
               const isSel = selectedCategoryId === cat.id;
               return (
@@ -436,15 +451,15 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
                     Mục: {currentSelectedCategoryObj.name}
                   </span>
 
-                  {/* DIRECT DELETE CATEGORY BUTTON IN QUESTION HEADER */}
-                  <button
+                  {/* A folder is edited in the tree and can only be deleted when empty. */}
+                  {!isFolder(currentSelectedCategoryObj) && <button
                     onClick={() => setCatToDelete(currentSelectedCategoryObj)}
                     className="px-2.5 py-1 bg-red-500/10 hover:bg-red-600 text-red-600 hover:text-white border border-red-500/30 rounded-lg text-xs font-bold transition-all flex items-center space-x-1"
                     title="Xóa nhanh toàn bộ mục này"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                     <span>Xóa Mục Này</span>
-                  </button>
+                  </button>}
                 </div>
               )}
             </div>
@@ -749,6 +764,10 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
                 />
               </div>
 
+              <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">Nằm trong thư mục
+                <select value={newCatParentId || ''} onChange={event => setNewCatParentId(event.target.value || null)} className="mt-1 min-h-11 w-full rounded-xl border bg-white px-3 dark:bg-slate-900"><option value="">Ngoài cùng</option>{categories.filter(isFolder).map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select>
+              </label>
+
               <div className="flex justify-end space-x-2 pt-2">
                 <button
                   type="button"
@@ -782,12 +801,13 @@ export const CategoryManager: React.FC<CategoryManagerProps> = ({
                   onChange={(e) => setNewQCatId(e.target.value)}
                   className="w-full px-3 py-2 text-xs bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-xl text-slate-900 dark:text-slate-100"
                 >
-                  {categories.map((c) => (
+                  {leafCategories.map((c) => (
                     <option key={c.id} value={c.id}>
-                      {c.name}
+                      {categoryPath(categories, c.id)}
                     </option>
                   ))}
                 </select>
+                {!leafCategories.length && <p className="mt-2 text-xs text-amber-600">Hãy tạo một mục chứa câu hỏi trước khi thêm câu thủ công.</p>}
               </div>
 
               <div>

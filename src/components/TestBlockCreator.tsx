@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { categoryPath, isFolder } from '../utils/categoryTree';
 import { Category, CategorySelection, Question, TestConfig } from '../types/quiz';
 import { generateQuestionsWithGemini } from '../services/gemini';
 import { isQuestionValid, selectQuestionsForBlock } from '../utils/quizEngine';
@@ -41,6 +42,7 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
   preselectedCategoryId,
   onQuestionsGeneratedByAI,
 }) => {
+  const questionCategories = categories.filter(category => !isFolder(category));
   const [testTitle, setTestTitle] = useState('');
   // Preset choice: '40q_30m' | '50q_40m' | 'custom'
   const [presetType, setPresetType] = useState<'40q_30m' | '50q_40m' | 'custom'>('40q_30m');
@@ -53,7 +55,7 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
   // Per category selection setup
   const [categorySelections, setCategorySelections] = useState<Record<string, number>>(() => {
     const initial: Record<string, number> = {};
-    categories.forEach((c) => {
+    questionCategories.forEach((c) => {
       if (preselectedCategoryId && c.id === preselectedCategoryId) {
         initial[c.id] = Math.min(10, c.questionCount);
       } else {
@@ -65,7 +67,7 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
 
   const [selectedCatIds, setSelectedCatIds] = useState<Set<string>>(() => {
     if (preselectedCategoryId) return new Set([preselectedCategoryId]);
-    return new Set(categories.slice(0, 3).map((c) => c.id));
+    return new Set(questionCategories.slice(0, 3).map((c) => c.id));
   });
 
   // AI Block Generator Prompt
@@ -116,7 +118,7 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
     const totalQ = getEffectiveTotalQuestions();
     const timeM = getEffectiveTimeLimit();
 
-    const formattedSelections: CategorySelection[] = categories
+    const formattedSelections: CategorySelection[] = questionCategories
       .filter((c) => selectedCatIds.has(c.id))
       .map((c) => ({
         categoryId: c.id,
@@ -393,7 +395,7 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
             </p>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {categories.map((cat) => {
+              {questionCategories.map((cat) => {
                 const isChecked = selectedCatIds.has(cat.id);
                 const currentCount = categorySelections[cat.id] ?? 5;
                 const catValidCount = allQuestions.filter((q) => q.categoryId === cat.id && isQuestionValid(q)).length;
@@ -417,7 +419,7 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
                       />
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center space-x-1.5">
-                          <p className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">{cat.name}</p>
+                          <p className="text-xs font-bold text-slate-900 dark:text-slate-100 truncate">{categoryPath(categories, cat.id)}</p>
                           {catImagesCount > 0 && (
                             <span className="text-[10px] px-1.5 py-0.2 rounded bg-indigo-100 dark:bg-indigo-950 text-indigo-600 dark:text-indigo-400 font-bold shrink-0 flex items-center space-x-0.5">
                               <ImageIcon className="w-2.5 h-2.5" />
@@ -468,7 +470,7 @@ export const TestBlockCreator: React.FC<TestBlockCreatorProps> = ({
         {selectionMode === 'random_mix' && (
           <div className="p-4 bg-slate-50 dark:bg-slate-900/60 rounded-2xl border border-slate-200 dark:border-slate-700 space-y-2">
             <p className="text-xs text-slate-700 dark:text-slate-300 font-medium">
-              Hệ thống sẽ trộn ngẫu nhiên từ toàn bộ <strong className="text-indigo-600 dark:text-indigo-400">{totalAvailableQuestions} câu hỏi</strong> thuộc {categories.length} mục hiện có để đảm bảo tính khách quan toàn diện.
+              Hệ thống sẽ trộn ngẫu nhiên từ toàn bộ <strong className="text-indigo-600 dark:text-indigo-400">{totalAvailableQuestions} câu hỏi</strong> thuộc {questionCategories.length} mục hiện có để đảm bảo tính khách quan toàn diện.
             </p>
           </div>
         )}

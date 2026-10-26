@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Category, Question } from '../types/quiz';
+import { categoryPath, isFolder } from '../utils/categoryTree';
 import { parseUploadedFile, extractAnswerKeyDocument, applyAnswerKeysToQuestions, KeyMatchIssue, AnswerKeyDocument } from '../utils/fileParser';
 import { parseFileWithGemini } from '../services/gemini';
 import {
@@ -66,7 +67,7 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
   const [manualAnswers, setManualAnswers] = useState<Record<number, number>>({});
 
   // Category Target states
-  const [selectedTargetCatId, setSelectedTargetCatId] = useState<string>(categories[0]?.id || 'new');
+  const [selectedTargetCatId, setSelectedTargetCatId] = useState<string>(categories.find(category => !isFolder(category))?.id || 'new');
   const [customNewCatName, setCustomNewCatName] = useState('');
 
   if (!isOpen) return null;
@@ -517,9 +518,9 @@ BẢNG ĐÁP ÁN THAM KHẢO (Đề ở trên - Đáp án ở dưới):
                   className="px-3 py-1.5 text-xs bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-xl text-slate-900 dark:text-slate-100"
                 >
                   <option value="new">+ Tạo Mục mới ({customNewCatName || 'Theo tên file'})</option>
-                  {categories.map((c) => (
+                  {categories.filter(category => !isFolder(category)).map((c) => (
                     <option key={c.id} value={c.id}>
-                      {c.name} ({c.questionCount} câu)
+                      {categoryPath(categories, c.id)} ({c.questionCount} câu)
                     </option>
                   ))}
                 </select>

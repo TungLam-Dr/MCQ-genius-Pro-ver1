@@ -3,6 +3,7 @@ import { ArrowLeft, BookOpen, Flag, Pencil, Search, X } from 'lucide-react';
 import type { Category, Question, QuestionAttempt, ReviewGrade, ReviewSchedule, StudyFlagColor } from '../types/quiz';
 import { isQuestionValid } from '../utils/quizEngine';
 import { isReviewDue, isReviewOverdue, tomorrowStart } from '../utils/reviewScheduler';
+import { categoryPath, isFolder, subtreeIds } from '../utils/categoryTree';
 import { getStorageItem, setStorageItem } from '../utils/storage';
 import { AnswerExplanation } from './AnswerExplanation';
 
@@ -111,7 +112,8 @@ export const StudyReview: React.FC<Props> = ({
   }, [attempts, clock]);
   const blocks = useMemo(() => [...new Set(questions.map(q => q.sourceBlock).filter((v): v is number => typeof v === 'number'))].sort((a, b) => a - b), [questions]);
   const inBlock = useMemo(() => questions.filter(q => filters.block === 'all' || (filters.block === 'unassigned' ? q.sourceBlock == null : q.sourceBlock === Number(filters.block))), [questions, filters.block]);
-  const availableCategories = useMemo(() => categories.filter(c => inBlock.some(q => q.categoryId === c.id)), [categories, inBlock]);
+  const availableCategories = useMemo(() => categories.filter(c => inBlock.some(q => subtreeIds(categories, c.id).has(q.categoryId))), [categories, inBlock]);
+  const selectedCategoryIds = useMemo(() => filters.categoryIds.length ? new Set(filters.categoryIds.flatMap(id => [...subtreeIds(categories, id)])) : null, [categories, filters.categoryIds]);
   const tags = useMemo(() => [...new Set(inBlock.flatMap(q => q.tags || []))].sort(), [inBlock]);
   const activeBury = (id: string) => !!buriedUntil[id] && Date.parse(buriedUntil[id]) > clock;
   const matchesStatus = (q: Question) => {
@@ -131,7 +133,7 @@ export const StudyReview: React.FC<Props> = ({
     }
   };
   const visible = useMemo(() => inBlock.filter(q => {
-    if (filters.categoryIds.length && !filters.categoryIds.includes(q.categoryId)) return false;
+    if (selectedCategoryIds && !selectedCategoryIds.has(q.categoryId)) return false;
     if (filters.tag !== 'all' && !(q.tags || []).includes(filters.tag)) return false;
     if (filters.color !== 'all' && (!flags[q.id] || (flagColors[q.id] || 'red') !== filters.color)) return false;
     if (!matchesStatus(q)) return false;
@@ -140,7 +142,7 @@ export const StudyReview: React.FC<Props> = ({
       .some(part => searchable(part).includes(search));
   }), [inBlock, filters, stats, flags, flagColors, schedules, suspended, buriedUntil, clock]);
   const studyable = visible.filter(q => isQuestionValid(q) && !suspended[q.id] && !activeBury(q.id));
-  const scoped = inBlock.filter(q => !filters.categoryIds.length || filters.categoryIds.includes(q.categoryId));
+  const scoped = inBlock.filter(q => !selectedCategoryIds || selectedCategoryIds.has(q.categoryId));
   const dueCount = scoped.filter(q => isQuestionValid(q) && !suspended[q.id] && !activeBury(q.id) && isReviewDue(schedules[q.id], clock)).length;
   const newCount = scoped.filter(q => isQuestionValid(q) && !suspended[q.id] && !activeBury(q.id) && !schedules[q.id] && !(stats.get(q.id)?.total || 0)).length;
   const currentId = queue?.[position];
@@ -218,7 +220,7 @@ export const StudyReview: React.FC<Props> = ({
           <label className="text-sm font-semibold">Nhãn<select className={`${inputClass} mt-1`} value={filters.tag} onChange={event => updateFilter({ tag: event.target.value })}><option value="all">Mọi nhãn</option>{tags.map(tag => <option key={tag} value={tag}>{tag}</option>)}</select></label>
           <label className="text-sm font-semibold">Màu cờ<select className={`${inputClass} mt-1`} value={filters.color} onChange={event => updateFilter({ color: event.target.value as Filters['color'] })}><option value="all">Mọi màu</option>{colors.map(color => <option key={color.id} value={color.id}>{color.label}</option>)}</select></label>
         </div>
-        <fieldset><legend className="text-sm font-bold">Chọn mục trong Block (để trống là tất cả)</legend><div className="mt-2 flex max-h-40 flex-wrap gap-2 overflow-y-auto">{availableCategories.map(category => <label key={category.id} className="flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border px-3 text-xs"><input type="checkbox" checked={filters.categoryIds.includes(category.id)} onChange={event => updateFilter({ categoryIds: event.target.checked ? [...filters.categoryIds, category.id] : filters.categoryIds.filter(id => id !== category.id) })} />{category.name} ({inBlock.filter(q => q.categoryId === category.id).length})</label>)}{!availableCategories.length && <p className="text-xs text-slate-500">Block này chưa có câu hỏi trong mục nào.</p>}</div></fieldset>
+        <fieldset><legend className="text-sm font-bold">Chọn mục trong Block (để trống là tất cả)</legend><div className="mt-2 flex max-h-40 flex-wrap gap-2 overflow-y-auto">{availableCategories.map(category => <label key={category.id} className="flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border px-3 text-xs"><input type="checkbox" checked={filters.categoryIds.includes(category.id)} onChange={event => updateFilter({ categoryIds: event.target.checked ? [...filters.categoryIds, category.id] : filters.categoryIds.filter(id => id !== category.id) })} />{isFolder(category) ? '📁 ' : ''}{categoryPath(categories, category.id)} ({inBlock.filter(q => subtreeIds(categories, category.id).has(q.categoryId)).length})</label>)}{!availableCategories.length && <p className="text-xs text-slate-500">Block này chưa có câu hỏi trong mục nào.</p>}</div></fieldset>
         <label className="relative block"><Search size={18} className="absolute left-3 top-3.5 text-slate-400" /><input className={`${inputClass} pl-10`} value={filters.search} onChange={event => updateFilter({ search: event.target.value })} placeholder="Tìm nội dung, mã câu, đáp án..." aria-label="Tìm câu hỏi" /></label>
         <div className="flex flex-wrap gap-2"><button type="button" onClick={() => start(studyable.slice(0, limit).map(q => q.id))} disabled={!studyable.length} className="min-h-11 rounded-xl bg-amber-600 px-4 text-sm font-bold text-white disabled:opacity-40">Ôn {Math.min(studyable.length, limit)} câu theo bộ lọc</button><button type="button" onClick={() => start(scoped.filter(q => isQuestionValid(q) && !suspended[q.id] && !activeBury(q.id) && isReviewDue(schedules[q.id], clock)).slice(0, limit).map(q => q.id))} disabled={!dueCount} className="min-h-11 rounded-xl border px-4 text-sm font-bold disabled:opacity-40">Ôn câu đến hạn ({dueCount})</button><label className="inline-flex min-h-11 items-center gap-2 text-sm">Số câu<select className="min-h-11 rounded-xl border bg-white px-2 dark:bg-slate-900" value={limit} onChange={event => setLimit(Number(event.target.value))}><option value={20}>20</option><option value={40}>40</option><option value={100000}>Tất cả</option></select></label></div>
         <div className="flex flex-wrap items-center gap-2 border-t pt-3 dark:border-slate-700"><button type="button" onClick={saveFilter} className="min-h-11 rounded-xl border px-3 text-sm font-semibold">Lưu bộ lọc</button>{savedFilters.map(saved => <span key={saved.id} className="inline-flex items-center rounded-xl border"><button type="button" onClick={() => setFilters({ ...saved.filters, categoryIds: [...saved.filters.categoryIds] })} className="min-h-11 px-3 text-xs font-semibold">{saved.name}</button><button type="button" onClick={() => setSavedFilters(old => old.filter(item => item.id !== saved.id))} aria-label={`Xóa bộ lọc ${saved.name}`} className="min-h-11 min-w-11 border-l dark:border-slate-700"><X size={15} className="mx-auto" /></button></span>)}</div>
